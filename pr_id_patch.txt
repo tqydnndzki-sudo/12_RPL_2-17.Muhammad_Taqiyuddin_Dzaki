@@ -1,0 +1,62 @@
+PATCH FILE FOR PROCUREMENT.PHP
+
+To implement the generatePRId function and use it in the add purchase request form:
+
+1. First, add this function to the top of the procurement.php file, right after the session_start() block:
+
+```php
+/**
+ * Function to generate PR ID
+ * @param PDO $pdo Database connection
+ * @return string Generated PR ID
+ */
+function generatePRId(PDO $pdo) {
+    $year = date('Y');
+
+    $stmt = $pdo->prepare("
+        SELECT idrequest 
+        FROM purchaserequest 
+        WHERE idrequest LIKE :prefix 
+        ORDER BY idrequest DESC 
+        LIMIT 1
+    ");
+    $stmt->execute([':prefix' => "PR{$year}%"]);
+    $lastId = $stmt->fetchColumn();
+
+    if ($lastId) {
+        $lastNumber = (int) substr($lastId, -4);
+        $newNumber = $lastNumber + 1;
+    } else {
+        $newNumber = 1;
+    }
+
+    return 'PR' . $year . str_pad($newNumber, 4, '0', STR_PAD_LEFT);
+}
+```
+
+2. Then, in the add_purchase_request handler (around line 71), replace this block:
+
+```php
+// Generate ID for purchaserequest using sequences
+$stmt = $pdo->prepare("SELECT last_no FROM sequences WHERE name = 'purchaserequest'");
+$stmt->execute();
+$sequence = $stmt->fetch(PDO::FETCH_ASSOC);
+$lastNo = $sequence ? $sequence['last_no'] + 1 : 1;
+$idrequest = 'PR-' . str_pad($lastNo, 6, '0', STR_PAD_LEFT);
+
+// Update the sequence
+$stmt = $pdo->prepare("INSERT INTO sequences (name, last_no) VALUES ('purchaserequest', ?) ON DUPLICATE KEY UPDATE last_no = ?");
+$stmt->execute([$lastNo, $lastNo]);
+```
+
+With this single line:
+
+```php
+// Generate ID for purchaserequest using the generatePRId function
+$idrequest = generatePRId($pdo);
+```
+
+This will ensure that:
+1. The PR IDs are generated in the format PRYYYYNNNN (e.g., PR20230001)
+2. The numbering is sequential within each year
+3. The form submission will work correctly with the new ID generation method

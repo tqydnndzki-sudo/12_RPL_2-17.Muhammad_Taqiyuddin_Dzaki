@@ -1,0 +1,1329 @@
+<?php
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/../includes/auth.php';
+
+// Check if user is logged in
+$auth->checkAccess();
+
+// Get current user info
+$currentUserId = $_SESSION['user_id'] ?? '';
+$currentUserRole = $_SESSION['role'] ?? '';
+
+// Handle Add Purchase Request
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_purchase_request'])) {
+    $namarequestor = $_POST['namarequestor'] ?? '';
+    $keterangan = $_POST['keterangan'] ?? '';
+    $tgl_req = $_POST['tgl_req'] ?? date('Y-m-d H:i:s');
+    $tgl_butuh = $_POST['tgl_butuh'] ?? '';
+    $idsupervisor = $_POST['idsupervisor'] ?? '';
+    
+    // Generate unique ID for the request
+    $idrequest = 'PR-' . date('Ymd') . '-' . strtoupper(substr(md5(uniqid()), 0, 6));
+    
+    try {
+        // Determine initial status based on user role
+        $initialStatus = 1; // Default to Process Approval Leader
+        
+        // Special cases based on role
+        if ($currentUserRole === 'Manager') {
+            $initialStatus = 3; // Auto-approved for managers
+        } elseif ($currentUserRole === 'Procurement' && $namarequestor !== ($_SESSION['username'] ?? '')) {
+            $initialStatus = 2; // Process Approval Manager if created by procurement for someone else
+        }
+        
+        // Insert purchase request
+        $stmt = $pdo->prepare("
+            INSERT INTO purchaserequest (idrequest, iduserrequest, namarequestor, keterangan, tgl_req, tgl_butuh, idsupervisor, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ");
+        $stmt->execute([$idrequest, $currentUserId, $namarequestor, $keterangan, $tgl_req, $tgl_butuh, $idsupervisor, $initialStatus]);
+        
+        // Log initial status
+        $stmtLog = $pdo->prepare("
+            INSERT INTO logstatusreq (status, date, idrequest)
+            VALUES (?, NOW(), ?)
+        ");
+        $stmtLog->execute([$initialStatus, $idrequest]);
+        
+        // Set success message
+        $success_message = "Purchase Request created successfully with ID: " . $idrequest;
+    } catch (Exception $e) {
+        $error_message = "Error creating purchase request: " . $e->getMessage();
+    }
+}
+
+// Handle Edit Purchase Request
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['edit_purchase_request'])) {
+    $idrequest = $_POST['idrequest'] ?? '';
+    $namarequestor = $_POST['namarequestor'] ?? '';
+    $keterangan = $_POST['keterangan'] ?? '';
+    $tgl_req = $_POST['tgl_req'] ?? '';
+    $tgl_butuh = $_POST['tgl_butuh'] ?? '';
+    $idsupervisor = $_POST['idsupervisor'] ?? '';
+    
+    try {
+        $stmt = $pdo->prepare("
+            UPDATE purchaserequest 
+            SET namarequestor = ?, keterangan = ?, tgl_req = ?, tgl_butuh = ?, idsupervisor = ?
+            WHERE idrequest = ?
+        ");
+        $stmt->execute([$namarequestor, $keterangan, $tgl_req, $tgl_butuh, $idsupervisor, $idrequest]);
+        
+        $success_message = "Purchase Request updated successfully";
+    } catch (Exception $e) {
+        $error_message = "Error updating purchase request: " . $e->getMessage();
+    }
+}
+
+// Initialize variables
+$activeTab = isset($_GET['tab']) ? $_GET['tab'] : 'overview';
+// Handle filter parameters more robustly
+$selectedYear = 0;
+$selectedMonth = 0;
+
+if (isset($_GET['year']) && $_GET['year'] !== '' && $_GET['year'] !== '0' && $_GET['year'] !== 'All Years') {
+    $selectedYear = (int)$_GET['year'];
+}
+
+if (isset($_GET['month']) && $_GET['month'] !== '' && $_GET['month'] !== '0' && $_GET['month'] !== 'All Months') {
+    $selectedMonth = (int)$_GET['month'];
+}
+
+$search = $_GET['search'] ?? '';
+$page = isset($_GET['page']) ? (int)$_GET['page'] : 1;
+$limit = 25;
+$offset = ($page - 1) * $limit;
+
+// Query untuk Overview - Total Amount Purchase Order
+$queryTotalPO = "
+    SELECT 
+        COALESCE(SUM(dor.total), 0) as total_amount
+    FROM purchaseorder po
+    LEFT JOIN detailorder dor ON po.idpurchaseorder = dor.idpurchaseorder
+    WHERE 1=1
+        " . ($selectedYear > 0 ? "AND YEAR(po.created_at) = :year" : "") . "
+        " . ($selectedMonth > 0 ? "AND MONTH(po.created_at) = :month" : "") . "
+";
+
+$stmtTotalPO = $pdo->prepare($queryTotalPO);
+$params = [];
+if ($selectedYear > 0) {
+    $params[':year'] = $selectedYear;
+}
+if ($selectedMonth > 0) {
+    $params[':month'] = $selectedMonth;
+}
+$stmtTotalPO->execute($params);
+$totalPO = $stmtTotalPO->fetch(PDO::FETCH_ASSOC);
+
+// Query untuk Remain Purchase Request
+$queryRemainPR = "
+    SELECT 
+        COUNT(DISTINCT pr.idrequest) as jumlah_pr,
+        COALESCE(SUM(dreq.total), 0) as total_amount
+    FROM purchaserequest pr
+    LEFT JOIN detailrequest dreq ON pr.idrequest = dreq.idrequest
+    LEFT JOIN (
+        SELECT idrequest, status
+        FROM (
+            SELECT idrequest, status,
+                   ROW_NUMBER() OVER (PARTITION BY idrequest ORDER BY date DESC) as rn
+            FROM logstatusreq
+        ) ranked
+        WHERE rn = 1
+    ) ls ON pr.idrequest = ls.idrequest
+    WHERE 1=1
+        AND COALESCE(ls.status, 0) NOT IN (3, 6)
+        " . ($selectedYear > 0 ? "AND YEAR(pr.tgl_req) = :year" : "") . "
+        " . ($selectedMonth > 0 ? "AND MONTH(pr.tgl_req) = :month" : "") . "
+";
+
+$stmtRemainPR = $pdo->prepare($queryRemainPR);
+$params = [];
+if ($selectedYear > 0) {
+    $params[':year'] = $selectedYear;
+}
+if ($selectedMonth > 0) {
+    $params[':month'] = $selectedMonth;
+}
+$stmtRemainPR->execute($params);
+$remainPR = $stmtRemainPR->fetch(PDO::FETCH_ASSOC);
+
+// Query untuk Chart - Purchase Request by Status
+$queryPRStatus = "
+    SELECT 
+        CASE COALESCE(ls.status, 0)
+            WHEN 1 THEN 'Process Approval Leader'
+            WHEN 2 THEN 'Process Approval Manager'
+            WHEN 3 THEN 'Approved'
+            WHEN 4 THEN 'Hold'
+            WHEN 5 THEN 'Reject'
+            WHEN 6 THEN 'Done'
+            ELSE 'Pending'
+        END as status_name,
+        COALESCE(ls.status, 0) as status_code,
+        COUNT(*) as jumlah
+    FROM purchaserequest pr
+    LEFT JOIN (
+        SELECT idrequest, status
+        FROM (
+            SELECT idrequest, status,
+                   ROW_NUMBER() OVER (PARTITION BY idrequest ORDER BY date DESC) as rn
+            FROM logstatusreq
+        ) ranked
+        WHERE rn = 1
+    ) ls ON pr.idrequest = ls.idrequest
+    WHERE 1=1
+        " . ($selectedYear > 0 ? "AND YEAR(pr.tgl_req) = :year" : "") . "
+        " . ($selectedMonth > 0 ? "AND MONTH(pr.tgl_req) = :month" : "") . "
+    GROUP BY ls.status
+    ORDER BY ls.status
+";
+
+$stmtPRStatus = $pdo->prepare($queryPRStatus);
+$params = [];
+if ($selectedYear > 0) {
+    $params[':year'] = $selectedYear;
+}
+if ($selectedMonth > 0) {
+    $params[':month'] = $selectedMonth;
+}
+$stmtPRStatus->execute($params);
+$prStatusData = $stmtPRStatus->fetchAll(PDO::FETCH_ASSOC);
+
+// Query untuk Annual Expenditure Chart (12 months data)
+$queryAnnualExpenditure = "
+    SELECT 
+        MONTH(po.created_at) as month_num,
+        MONTHNAME(po.created_at) as month_name,
+        COALESCE(SUM(dor.total), 0) as total_expenditure
+    FROM purchaseorder po
+    LEFT JOIN detailorder dor ON po.idpurchaseorder = dor.idpurchaseorder
+    WHERE 1=1
+        " . ($selectedYear > 0 ? "AND YEAR(po.created_at) = :selected_year" : "AND YEAR(po.created_at) = YEAR(CURDATE())") . "
+    GROUP BY MONTH(po.created_at), MONTHNAME(po.created_at)
+    ORDER BY MONTH(po.created_at)
+";
+
+$stmtAnnualExpenditure = $pdo->prepare($queryAnnualExpenditure);
+$annualExpenditureParams = [];
+if ($selectedYear > 0) {
+    $annualExpenditureParams[':selected_year'] = $selectedYear;
+}
+$stmtAnnualExpenditure->execute($annualExpenditureParams);
+$annualExpenditureData = $stmtAnnualExpenditure->fetchAll(PDO::FETCH_ASSOC);
+
+// Query untuk Progress Purchase Requests Table
+$queryProgressPR = "
+    SELECT 
+        pr.idrequest,
+        pr.tgl_req,
+        pr.namarequestor,
+        pr.keterangan,
+        COALESCE(ls.status, 0) as status_code,
+        CASE COALESCE(ls.status, 0)
+            WHEN 1 THEN 'Process Approval Leader'
+            WHEN 2 THEN 'Process Approval Manager'
+            WHEN 3 THEN 'Approved'
+            WHEN 4 THEN 'Hold'
+            WHEN 5 THEN 'Reject'
+            WHEN 6 THEN 'Done'
+            ELSE 'Pending'
+        END as status_name,
+        COALESCE(progress.items_arrived, 0) as items_arrived,
+        COALESCE(progress.total_items, 1) as total_items,
+        ROUND((COALESCE(progress.items_arrived, 0) / COALESCE(progress.total_items, 1)) * 100, 2) as progress_percentage
+    FROM purchaserequest pr
+    LEFT JOIN (
+        SELECT idrequest, status
+        FROM (
+            SELECT idrequest, status,
+                   ROW_NUMBER() OVER (PARTITION BY idrequest ORDER BY date DESC) as rn
+            FROM logstatusreq
+        ) ranked
+        WHERE rn = 1
+    ) ls ON pr.idrequest = ls.idrequest
+    LEFT JOIN (
+        SELECT 
+            dr.idrequest,
+            COUNT(*) as total_items,
+            COUNT(CASE WHEN lsb.status = 4 THEN 1 END) as items_arrived
+        FROM detailrequest dr
+        LEFT JOIN (
+            SELECT iddetailrequest, status
+            FROM (
+                SELECT iddetailrequest, status,
+                       ROW_NUMBER() OVER (PARTITION BY iddetailrequest ORDER BY date DESC) as rn
+                FROM logstatusbarang
+            ) ranked
+            WHERE rn = 1
+        ) lsb ON dr.iddetailrequest = lsb.iddetailrequest
+        GROUP BY dr.idrequest
+    ) progress ON pr.idrequest = progress.idrequest
+    WHERE 1=1
+        AND pr.idrequest IN (
+            SELECT DISTINCT po.idrequest 
+            FROM purchaseorder po 
+            WHERE po.idrequest IS NOT NULL
+        )
+        " . ($selectedYear > 0 ? "AND YEAR(pr.tgl_req) = :year" : "") . "
+        " . ($selectedMonth > 0 ? "AND MONTH(pr.tgl_req) = :month" : "") . "
+    ORDER BY pr.tgl_req DESC
+    LIMIT 10
+";
+
+$stmtProgressPR = $pdo->prepare($queryProgressPR);
+$params = [];
+if ($selectedYear > 0) {
+    $params[':year'] = $selectedYear;
+}
+if ($selectedMonth > 0) {
+    $params[':month'] = $selectedMonth;
+}
+$stmtProgressPR->execute($params);
+$progressPRData = $stmtProgressPR->fetchAll(PDO::FETCH_ASSOC);
+
+// Prepare data for charts
+$chartLabels = [];
+$chartData = [];
+$chartColors = [
+    'Process Approval Leader' => '#fbbf24',
+    'Process Approval Manager' => '#60a5fa',
+    'Approved' => '#34d399',
+    'Hold' => '#fb923c',
+    'Reject' => '#f87171',
+    'Done' => '#10b981',
+    'Pending' => '#9ca3af'
+];
+$chartBackgroundColors = [];
+
+foreach ($prStatusData as $row) {
+    $chartLabels[] = $row['status_name'];
+    $chartData[] = $row['jumlah'];
+    $chartBackgroundColors[] = $chartColors[$row['status_name']] ?? '#9ca3af';
+}
+
+// Prepare data for annual expenditure chart
+$months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+$monthlyExpenditure = array_fill(0, 12, 0);
+
+foreach ($annualExpenditureData as $row) {
+    $monthIndex = $row['month_num'] - 1;
+    $monthlyExpenditure[$monthIndex] = (float)$row['total_expenditure'];
+}
+
+// Initialize items array
+$items = [];
+$total_pages = 1;
+
+// Queries based on active tab
+if ($activeTab == 'purchase-request') {
+    $searchCondition = $search ? "AND (pr.idrequest LIKE :search OR pr.keterangan LIKE :search)" : "";
+    
+    // Tambahkan filter tahun dan bulan
+    $dateFilter = "";
+    if ($selectedYear > 0) {
+        $dateFilter .= " AND YEAR(pr.tgl_req) = :year";
+    }
+    if ($selectedMonth > 0) {
+        $dateFilter .= " AND MONTH(pr.tgl_req) = :month";
+    }
+    
+    $countQuery = "SELECT COUNT(*) FROM purchaserequest pr 
+                   WHERE 1=1 $searchCondition $dateFilter";
+    $countStmt = $pdo->prepare($countQuery);
+    if ($search) $countStmt->bindValue(':search', "%$search%");
+    if ($selectedYear > 0) $countStmt->bindValue(':year', $selectedYear, PDO::PARAM_INT);
+    if ($selectedMonth > 0) $countStmt->bindValue(':month', $selectedMonth, PDO::PARAM_INT);
+    $countStmt->execute();
+    $totalItems = $countStmt->fetchColumn();
+    $total_pages = ceil($totalItems / $limit);
+    
+    $stmt = $pdo->prepare("
+        SELECT 
+            pr.idrequest,
+            pr.tgl_req,
+            pr.namarequestor,
+            pr.keterangan,
+            COALESCE(ls.status, 0) as status_code,
+            CASE COALESCE(ls.status, 0)
+                WHEN 1 THEN 'Process Approval Leader'
+                WHEN 2 THEN 'Process Approval Manager'
+                WHEN 3 THEN 'Approved'
+                WHEN 4 THEN 'Hold'
+                WHEN 5 THEN 'Reject'
+                WHEN 6 THEN 'Done'
+                ELSE 'Pending'
+            END as status_name
+        FROM purchaserequest pr
+        LEFT JOIN (
+            SELECT idrequest, status
+            FROM (
+                SELECT idrequest, status,
+                       ROW_NUMBER() OVER (PARTITION BY idrequest ORDER BY date DESC) as rn
+                FROM logstatusreq
+            ) ranked
+            WHERE rn = 1
+        ) ls ON pr.idrequest = ls.idrequest
+        WHERE 1=1 $searchCondition $dateFilter
+        ORDER BY pr.tgl_req DESC
+        LIMIT :limit OFFSET :offset
+    ");
+    if ($search) $stmt->bindValue(':search', "%$search%");
+    if ($selectedYear > 0) $stmt->bindValue(':year', $selectedYear, PDO::PARAM_INT);
+    if ($selectedMonth > 0) $stmt->bindValue(':month', $selectedMonth, PDO::PARAM_INT);
+    $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+    $stmt->bindValue(':offset', $offset, PDO::PARAM_INT);
+    $stmt->execute();
+    $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    
+                   WHERE 1=1 $searchCondition $dateFilter";
+    $countStmt = $pdo->prepare($countQuery);
+    if ($search) $countStmt->bindValue(':search', "%$search%");
+    if ($selectedYear > 0) $countStmt->bindValue(':year', $selectedYear, PDO::PARAM_INT);
+    if ($selectedMonth > 0) $countStmt->bindValue(':month', $selectedMonth, PDO::PARAM_INT);
+    $countStmt->execute();
+    $totalItems = $countStmt->fetchColumn();
+    $total_pages = ceil($totalItems / $limit);
+    
+    $stmt = $pdo->prepare("
+        SELECT 
+            po.idpurchaseorder,
+            po.tgl_po,
+            po.supplier,
+            pr.idrequest,
+            pr.keterangan,
+            COALESCE(lso.status, 'Pending') as status_name
+        FROM purchaseorder po
+        LEFT JOIN purchaserequest pr ON po.idrequest = pr.idrequest
+        LEFT JOIN (
+            SELECT idpurchaseorder, status
+            FROM (
+                SELECT idpurchaseorder, status,
+                       ROW_NUMBER() OVER (PARTITION BY idpurchaseorder ORDER BY date DESC) as rn
+                FROM logstatusorder
+            ) ranked
+            WHERE rn = 1
+        ) lso ON po.idpurchaseorder = lso.idpurchaseorder
+        WHERE 1=1 $searchCondition $dateFilter
+        ORDER BY po.tgl_po DESC
+        LIMIT :limit OFFSET :offset
+    ");
+    if ($search) $stmt->bindValue(':search', "%$search%");
+    if ($selectedYear > 0) $stmt->bindValue(':year', $selectedYear, PDO::PARAM_INT);
+    if ($selectedMonth > 0) $stmt->bindValue(':month', $selectedMonth, PDO::PARAM_INT);
+    $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+    $stmt->bindValue(':offset', $offset, PDO::PARAM_INT);
+    $stmt->execute();
+    $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
+}
+
+$title = 'Procurement';
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Procurement - Internal Management System</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        /* Modal Styles */
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0,0,0,0.5);
+        }
+        .modal-content {
+            background-color: #fefefe;
+            margin: 5% auto;
+            padding: 20px;
+            border: 1px solid #888;
+            width: 80%;
+            max-width: 600px;
+            border-radius: 8px;
+        }
+        .close {
+            color: #aaa;
+            float: right;
+            font-size: 28px;
+            font-weight: bold;
+            cursor: pointer;
+        }
+        .close:hover,
+        .close:focus {
+            color: black;
+            text-decoration: none;
+        }
+    </style></head>
+<body class="bg-gray-50">
+
+<div class="flex min-h-screen">
+    
+    <!-- SIDEBAR -->
+    <aside class="w-64 bg-white border-r border-gray-200 fixed h-full flex flex-col">
+        <div class="p-6">
+            <h1 class="text-xl font-bold text-gray-900">Internal Management<br>System</h1>
+        </div>
+        
+        <nav class="px-4 space-y-1 flex-grow">
+            <a href="inventory.php" class="flex items-center gap-3 px-4 py-3 text-gray-700 hover:bg-gray-100 rounded-lg transition">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/>
+                </svg>
+                <span class="font-medium">Inventory</span>
+            </a>
+            
+            <a href="procurement.php" class="flex items-center gap-3 px-4 py-3 bg-gray-100 text-gray-900 rounded-lg">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z"/>
+                </svg>
+                <span class="font-medium">Procurement</span>
+            </a>
+            
+            <a href="master-data.php" class="flex items-center gap-3 px-4 py-3 text-gray-700 hover:bg-gray-100 rounded-lg transition">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4"/>
+                </svg>
+                <span class="font-medium">Master Data</span>
+            </a>
+        </nav>
+        
+        <!-- User Info and Logout -->
+        <div class="p-4 border-t border-gray-200 mt-auto">
+            <div class="mb-3">
+                <p class="text-sm text-gray-600">Logged in as:</p>
+                <p class="font-medium text-gray-900"><?php echo htmlspecialchars($_SESSION['username'] ?? 'Guest'); ?></p>
+                <p class="text-xs text-gray-500"><?php echo htmlspecialchars($_SESSION['role'] ?? 'Unknown'); ?></p>
+            </div>
+            <a href="/logout.php" class="block w-full px-4 py-2 text-center text-sm font-medium text-white bg-red-600 rounded-lg hover:bg-red-700 transition">
+                <i class="fas fa-sign-out-alt mr-2"></i>Logout
+            </a>
+        </div>
+    </aside>
+
+    <!-- MAIN CONTENT -->
+    <main class="flex-1 ml-64 p-8">
+        
+        <h1 class="text-3xl font-bold text-gray-900 mb-6">Procurement</h1>
+
+        <!-- TABS -->
+        <div class="bg-white rounded-lg shadow mb-6">
+            <div class="border-b border-gray-200">
+                <nav class="flex -mb-px">
+                    <button onclick="showTab('overview')" id="tab-overview" class="tab-button border-b-2 border-blue-600 text-blue-600 py-4 px-6 font-medium">
+                        Overview
+                    </button>
+                    <button onclick="showTab('purchase-request')" id="tab-purchase-request" class="tab-button border-b-2 border-transparent text-gray-600 hover:text-gray-900 hover:border-gray-300 py-4 px-6 font-medium">
+                        Purchase Request
+                    </button>
+                    <button onclick="showTab('purchase-order')" id="tab-purchase-order" class="tab-button border-b-2 border-transparent text-gray-600 hover:text-gray-900 hover:border-gray-300 py-4 px-6 font-medium">
+                        Purchase Order
+                    </button>
+                </nav>
+            </div>
+
+            <!-- TAB CONTENT -->
+            <div class="p-6">
+                
+                <!-- OVERVIEW TAB -->
+                <?php if ($activeTab == 'overview'): ?>
+                <div>
+                    <!-- Toolbar - Simplified without search and buttons -->
+                    <div class="flex justify-end items-center mb-6">
+                        <div class="flex gap-4 items-center">
+                            <div>
+                                <select onchange="filterData()" id="filter-month-<?= $activeTab ?>" class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-32">
+                                    <option value="0" <?= $selectedMonth == 0 ? 'selected' : '' ?>>All Months</option>
+                                    <?php for($m = 1; $m <= 12; $m++): ?>
+                                    <option value="<?= $m ?>" <?= $selectedMonth == $m ? 'selected' : '' ?>><?= date('F', mktime(0, 0, 0, $m, 1)) ?></option>
+                                    <?php endfor; ?>
+                                </select>
+                            </div>
+                            <div>
+                                <select onchange="filterData()" id="filter-year-<?= $activeTab ?>" class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-32">
+                                    <option value="0" <?= $selectedYear == 0 ? 'selected' : '' ?>>All Years</option>
+                                    <?php for($y = date('Y'); $y >= 2020; $y--): ?>
+                                    <option value="<?= $y ?>" <?= $selectedYear == $y ? 'selected' : '' ?>><?= $y ?></option>
+                                    <?php endfor; ?>
+                                </select>
+                            </div>
+                            <button onclick="downloadReport()" class="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 font-medium flex items-center gap-2">
+                                <i class="fas fa-download"></i> Download
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Cards - Removed the green card -->
+                    <div class="grid grid-cols-1 gap-6 mb-8">
+                        
+                        <!-- Total Amount Purchase Order - Kept this card -->
+                        <div class="bg-gradient-to-br from-blue-900 to-blue-700 p-6 rounded-xl text-white relative overflow-hidden">
+                            <div class="absolute top-0 right-0 opacity-10 text-9xl"><i class="fas fa-shopping-cart"></i></div>
+                            <div class="relative z-10">
+                                <div class="flex justify-between items-start mb-4">
+                                    <h3 class="text-sm font-semibold opacity-90">Total Amount Purchase Order</h3>
+                                    <i class="fas fa-shopping-cart text-2xl opacity-80"></i>
+                                </div>
+                                <div class="text-3xl font-bold mb-2">Rp <?= number_format($totalPO['total_amount'], 0, ',', '.') ?></div>
+                            </div>
+                        </div>
+
+                    </div>
+
+                    <!-- Charts Section -->
+                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+                        <!-- Column Chart - Annual Expenditure -->
+                        <div class="bg-white p-4 rounded-lg shadow">
+                            <h3 class="text-lg font-semibold mb-4">Annual Expenditure (<?= $selectedYear > 0 ? $selectedYear : date('Y') ?>)</h3>
+                            <div style="position: relative; height: 200px">
+                                <canvas id="chartAnnualExpenditure"></canvas>
+                            </div>
+                        </div>
+                        
+                        <!-- Doughnut Chart - Purchase Request by Status -->
+                        <div class="bg-white p-4 rounded-lg shadow">
+                            <h3 class="text-lg font-semibold mb-4">Purchase Request by Status</h3>
+                            <div style="position: relative; height: 200px">
+                                <canvas id="chartRemainPR"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Progress Table -->
+                    <div class="bg-white rounded-lg shadow mb-6">
+                        <div class="p-4 border-b border-gray-200">
+                            <h3 class="text-lg font-semibold">Purchase Request Progress</h3>
+                        </div>
+                        <div class="overflow-x-auto">
+                            <table class="min-w-full divide-y divide-gray-200">
+                                <thead class="bg-gray-50">
+                                    <tr>
+                                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID Request</th>
+                                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
+                                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Requestor</th>
+                                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Description</th>
+                                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Progress</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="bg-white divide-y divide-gray-200">
+                                    <?php if (empty($progressPRData)): ?>
+                                        <tr>
+                                            <td colspan="6" class="px-6 py-4 text-center text-gray-500">
+                                                No data available
+                                            </td>
+                                        </tr>
+                                    <?php else: ?>
+                                        <?php foreach ($progressPRData as $item): ?>
+                                        <tr class="hover:bg-gray-50">
+                                            <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900"><?= htmlspecialchars($item['idrequest']) ?></td>
+                                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= htmlspecialchars(date('d M Y', strtotime($item['tgl_req']))) ?></td>
+                                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= htmlspecialchars($item['namarequestor']) ?></td>
+                                            <td class="px-6 py-4 text-sm text-gray-500"><?= htmlspecialchars($item['keterangan']) ?></td>
+                                            <td class="px-6 py-4 whitespace-nowrap">
+                                                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium
+                                                    <?php 
+                                                        switch($item['status_code']) {
+                                                            case 1: echo 'bg-yellow-100 text-yellow-800'; break;
+                                                            case 2: echo 'bg-blue-100 text-blue-800'; break;
+                                                            case 3: echo 'bg-green-100 text-green-800'; break;
+                                                            case 4: echo 'bg-orange-100 text-orange-800'; break;
+                                                            case 5: echo 'bg-red-100 text-red-800'; break;
+                                                            case 6: echo 'bg-green-200 text-green-900'; break;
+                                                            default: echo 'bg-gray-100 text-gray-800'; break;
+                                                        }
+                                                    ?>">
+                                                    <?= htmlspecialchars($item['status_name']) ?>
+                                                </span>
+                                            </td>
+                                            <td class="px-6 py-4 whitespace-nowrap">
+                                                <div class="flex items-center">
+                                                    <div class="w-full bg-gray-200 rounded-full h-2 mr-2">
+                                                        <div class="bg-blue-600 h-2 rounded-full" style="width: <?= $item['progress_percentage'] ?>%"></div>
+                                                    </div>
+                                                    <span class="text-sm text-gray-500"><?= $item['progress_percentage'] ?>%</span>
+                                                </div>
+                                                <div class="text-xs text-gray-500 mt-1">
+                                                    <?= $item['items_arrived'] ?>/<?= $item['total_items'] ?> items arrived
+                                                </div>
+                                            </td>
+                                        </tr>
+                                        <?php endforeach; ?>
+                                    <?php endif; ?>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+                <?php endif; ?>
+
+                <!-- PURCHASE REQUEST TAB -->
+                <?php if ($activeTab == 'purchase-request'): ?>
+                <div>
+                    <!-- Toolbar -->
+                    <div class="flex justify-between items-center mb-6">
+                        <div class="flex gap-2">
+                            <button id="add-pr-button" class="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium flex items-center gap-2">
+                                <i class="fas fa-plus"></i> Add
+                            </button>
+                            <button id="edit-pr-button" class="px-6 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 font-medium flex items-center gap-2">
+                                <i class="fas fa-edit"></i> Edit
+                            </button>
+                        </div>                        <div class="flex gap-4 items-center">
+                            <form method="GET" class="flex gap-2">
+                                <input type="hidden" name="tab" value="<?= $activeTab ?>">
+                                <?php if ($selectedYear > 0): ?>
+                                <input type="hidden" name="year" value="<?= $selectedYear ?>">
+                                <?php endif; ?>
+                                <?php if ($selectedMonth > 0): ?>
+                                <input type="hidden" name="month" value="<?= $selectedMonth ?>">
+                                <?php endif; ?>
+                                <input type="text" name="search" value="<?= htmlspecialchars($search) ?>" placeholder="Search..." class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-64">
+                                <button type="submit" class="px-6 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300">
+                                    <i class="fas fa-search"></i> Search
+                                </button>
+                            </form>
+                            <div>
+                                <select onchange="filterData()" id="filter-month-<?= $activeTab ?>" class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-32">
+                                    <option value="0" <?= $selectedMonth == 0 ? 'selected' : '' ?>>All Months</option>
+                                    <?php for($m = 1; $m <= 12; $m++): ?>
+                                    <option value="<?= $m ?>" <?= $selectedMonth == $m ? 'selected' : '' ?>><?= date('F', mktime(0, 0, 0, $m, 1)) ?></option>
+                                    <?php endfor; ?>
+                                </select>
+                            </div>
+                            <div>
+                                <select onchange="filterData()" id="filter-year-<?= $activeTab ?>" class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-32">
+                                    <option value="0" <?= $selectedYear == 0 ? 'selected' : '' ?>>All Years</option>
+                                    <?php for($y = date('Y'); $y >= 2020; $y--): ?>
+                                    <option value="<?= $y ?>" <?= $selectedYear == $y ? 'selected' : '' ?>><?= $y ?></option>
+                                    <?php endfor; ?>
+                                </select>
+                            </div>
+                            <button onclick="downloadReport()" class="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 font-medium flex items-center gap-2">
+                                <i class="fas fa-download"></i> Download
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Table -->
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full divide-y divide-gray-200">
+                            <thead class="bg-gray-50">
+                                <tr>
+                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" width="50">#</th>
+                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID Request</th>
+                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Tanggal Request</th>
+                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Nama Requestor</th>
+                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Keterangan</th>
+                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Action</th>
+                                </tr>
+                            </thead>
+                            <tbody class="bg-white divide-y divide-gray-200">
+                                <?php if (empty($items)): ?>
+                                    <tr>
+                                        <td colspan="7" class="px-6 py-4 text-center text-gray-500">
+                                            Tidak ada data
+                                        </td>
+                                    </tr>
+                                <?php else: ?>
+                                    <?php 
+                                    $row_number = $offset + 1;
+                                    foreach ($items as $item): ?>
+                                    <tr class="hover:bg-gray-50">
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= $row_number++ ?></td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900"><strong><?= htmlspecialchars($item['idrequest'] ?? '-') ?></strong></td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= htmlspecialchars($item['tgl_req'] ?? '-') ?></td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= htmlspecialchars($item['namarequestor'] ?? '-') ?></td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= htmlspecialchars($item['keterangan'] ?? '-') ?></td>
+                                        <td class="px-6 py-4 whitespace-nowrap">
+                                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium
+                                                <?php 
+                                                    switch($item['status_code']) {
+                                                        case 1: echo 'bg-yellow-100 text-yellow-800'; break;
+                                                        case 2: echo 'bg-blue-100 text-blue-800'; break;
+                                                        case 3: echo 'bg-green-100 text-green-800'; break;
+                                                        case 4: echo 'bg-orange-100 text-orange-800'; break;
+                                                        case 5: echo 'bg-red-100 text-red-800'; break;
+                                                        case 6: echo 'bg-green-200 text-green-900'; break;
+                                                        default: echo 'bg-gray-100 text-gray-800'; break;
+                                                    }
+                                                ?>">
+                                                <?= htmlspecialchars($item['status_name']) ?>
+                                            </span>
+                                        </td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                            <a href="detail-request.php?idrequest=<?= urlencode($item['idrequest']) ?>" class="px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 text-xs inline-block">
+                                                Detail
+                                            </a>                                        </td>                                    </tr>
+                                    <?php endforeach; ?>
+                                <?php endif; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                    
+                    <!-- Pagination -->
+                    <?php if ($total_pages > 1): ?>
+                    <div class="flex items-center justify-between border-t border-gray-200 bg-white px-4 py-3 sm:px-6">
+                        <div class="flex flex-1 justify-between sm:hidden">
+                            <?php if ($page > 1): ?>
+                            <a href="?tab=<?= $activeTab ?>&page=<?= $page - 1 ?><?php if ($selectedYear > 0) echo '&year=' . $selectedYear; ?><?php if ($selectedMonth > 0) echo '&month=' . $selectedMonth; ?><?php if ($search) echo '&search=' . urlencode($search); ?>" class="relative inline-flex items-center rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">Previous</a>
+                            <?php endif; ?>
+                            
+                            <?php if ($page < $total_pages): ?>
+                            <a href="?tab=<?= $activeTab ?>&page=<?= $page + 1 ?><?php if ($selectedYear > 0) echo '&year=' . $selectedYear; ?><?php if ($selectedMonth > 0) echo '&month=' . $selectedMonth; ?><?php if ($search) echo '&search=' . urlencode($search); ?>" class="relative ml-3 inline-flex items-center rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">Next</a>
+                            <?php endif; ?>
+                        </div>
+                        <div class="hidden sm:flex sm:flex-1 sm:items-center sm:justify-between">
+                            <div>
+                                <p class="text-sm text-gray-700">
+                                    Showing <span class="font-medium"><?= $offset + 1 ?></span> to <span class="font-medium"><?= min($offset + $limit, $totalItems) ?></span> of <span class="font-medium"><?= $totalItems ?></span> results
+                                </p>
+                            </div>
+                            <div>
+                                <nav class="isolate inline-flex -space-x-px rounded-md shadow-sm" aria-label="Pagination">
+                                    <?php if ($page > 1): ?>
+                                    <a href="?tab=<?= $activeTab ?>&page=<?= $page - 1 ?><?php if ($selectedYear > 0) echo '&year=' . $selectedYear; ?><?php if ($selectedMonth > 0) echo '&month=' . $selectedMonth; ?><?php if ($search) echo '&search=' . urlencode($search); ?>" class="relative inline-flex items-center rounded-l-md px-2 py-2 text-gray-400 ring-1 ring-inset ring-gray-300 hover:bg-gray-50 focus:z-20 focus:outline-offset-0">
+                                        <span class="sr-only">Previous</span>
+                                        <svg class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                            <path fill-rule="evenodd" d="M12.79 5.23a.75.75 0 01-.02 1.06L8.832 10l3.938 3.71a.75.75 0 11-1.04 1.08l-4.5-4.25a.75.75 0 010-1.08l4.5-4.25a.75.75 0 011.06.02z" clip-rule="evenodd" />
+                                        </svg>
+                                    </a>
+                                    <?php endif; ?>
+                                    
+                                    <?php for ($i = max(1, $page - 2); $i <= min($total_pages, $page + 2); $i++): ?>
+                                    <a href="?tab=<?= $activeTab ?>&page=<?= $i ?><?php if ($selectedYear > 0) echo '&year=' . $selectedYear; ?><?php if ($selectedMonth > 0) echo '&month=' . $selectedMonth; ?><?php if ($search) echo '&search=' . urlencode($search); ?>" class="<?php echo $i == $page ? 'relative z-10 inline-flex items-center bg-indigo-600 px-4 py-2 text-sm font-semibold text-white focus:z-20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600' : 'relative inline-flex items-center px-4 py-2 text-sm font-semibold text-gray-900 ring-1 ring-inset ring-gray-300 hover:bg-gray-50 focus:z-20 focus:outline-offset-0'; ?>">
+                                        <?= $i ?>
+                                    </a>
+                                    <?php endfor; ?>
+                                    
+                                    <?php if ($page < $total_pages): ?>
+                                    <a href="?tab=<?= $activeTab ?>&page=<?= $page + 1 ?><?php if ($selectedYear > 0) echo '&year=' . $selectedYear; ?><?php if ($selectedMonth > 0) echo '&month=' . $selectedMonth; ?><?php if ($search) echo '&search=' . urlencode($search); ?>" class="relative inline-flex items-center rounded-r-md px-2 py-2 text-gray-400 ring-1 ring-inset ring-gray-300 hover:bg-gray-50 focus:z-20 focus:outline-offset-0">
+                                        <span class="sr-only">Next</span>
+                                        <svg class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                            <path fill-rule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clip-rule="evenodd" />
+                                        </svg>
+                                    </a>
+                                    <?php endif; ?>
+                                </nav>
+                            </div>
+                        </div>
+                    </div>
+                    <?php endif; ?>
+                </div>
+                <?php endif; ?>
+
+                <!-- PURCHASE ORDER TAB -->
+                <?php if ($activeTab == 'purchase-order'): ?>
+                <div>
+                    <!-- Toolbar -->
+                    <div class="flex justify-between items-center mb-6">
+                        <div class="flex gap-2">
+                            <button class="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium flex items-center gap-2">
+                                <i class="fas fa-plus"></i> Add
+                            </button>
+                            <button class="px-6 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 font-medium flex items-center gap-2">
+                                <i class="fas fa-edit"></i> Edit
+                            </button>
+                        </div>
+                        <div class="flex gap-4 items-center">
+                            <form method="GET" class="flex gap-2">
+                                <input type="hidden" name="tab" value="<?= $activeTab ?>">
+                                <?php if ($selectedYear > 0): ?>
+                                <input type="hidden" name="year" value="<?= $selectedYear ?>">
+                                <?php endif; ?>
+                                <?php if ($selectedMonth > 0): ?>
+                                <input type="hidden" name="month" value="<?= $selectedMonth ?>">
+                                <?php endif; ?>
+                                <input type="text" name="search" value="<?= htmlspecialchars($search) ?>" placeholder="Search..." class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-64">
+                                <button type="submit" class="px-6 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300">
+                                    <i class="fas fa-search"></i> Search
+                                </button>
+                            </form>
+                            <div>
+                                <select onchange="filterData()" id="filter-month-<?= $activeTab ?>" class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-32">
+                                    <option value="0" <?= $selectedMonth == 0 ? 'selected' : '' ?>>All Months</option>
+                                    <?php for($m = 1; $m <= 12; $m++): ?>
+                                    <option value="<?= $m ?>" <?= $selectedMonth == $m ? 'selected' : '' ?>><?= date('F', mktime(0, 0, 0, $m, 1)) ?></option>
+                                    <?php endfor; ?>
+                                </select>
+                            </div>
+                            <div>
+                                <select onchange="filterData()" id="filter-year-<?= $activeTab ?>" class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-32">
+                                    <option value="0" <?= $selectedYear == 0 ? 'selected' : '' ?>>All Years</option>
+                                    <?php for($y = date('Y'); $y >= 2020; $y--): ?>
+                                    <option value="<?= $y ?>" <?= $selectedYear == $y ? 'selected' : '' ?>><?= $y ?></option>
+                                    <?php endfor; ?>
+                                </select>
+                            </div>
+                            <button onclick="downloadReport()" class="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 font-medium flex items-center gap-2">
+                                <i class="fas fa-download"></i> Download
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Table -->
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full divide-y divide-gray-200">
+                            <thead class="bg-gray-50">
+                                <tr>
+                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" width="50">#</th>
+                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID Purchase Order</th>
+                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Tanggal PO</th>
+                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Supplier</th>
+                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID Request</th>
+                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Keterangan</th>
+                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Action</th>
+                                </tr>
+                            </thead>
+                            <tbody class="bg-white divide-y divide-gray-200">
+                                <?php if (empty($items)): ?>
+                                    <tr>
+                                        <td colspan="8" class="px-6 py-4 text-center text-gray-500">
+                                            Tidak ada data
+                                        </td>
+                                    </tr>
+                                <?php else: ?>
+                                    <?php 
+                                    $row_number = $offset + 1;
+                                    foreach ($items as $item): ?>
+                                    <tr class="hover:bg-gray-50">
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= $row_number++ ?></td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900"><strong><?= htmlspecialchars($item['idpurchaseorder'] ?? '-') ?></strong></td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= htmlspecialchars($item['tgl_po'] ?? '-') ?></td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= htmlspecialchars($item['supplier'] ?? '-') ?></td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= htmlspecialchars($item['idrequest'] ?? '-') ?></td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= htmlspecialchars($item['keterangan'] ?? '-') ?></td>
+                                        <td class="px-6 py-4 whitespace-nowrap">
+                                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium
+                                                <?php 
+                                                    // Determine status color based on status name
+                                                    $statusClass = 'bg-gray-100 text-gray-800'; // Default
+                                                    if ($item['status_name'] == 'Process Order') {
+                                                        $statusClass = 'bg-blue-100 text-blue-800';
+                                                    } elseif ($item['status_name'] == 'Arrived') {
+                                                        $statusClass = 'bg-green-100 text-green-800';
+                                                    } elseif ($item['status_name'] == 'Pending') {
+                                                        $statusClass = 'bg-yellow-100 text-yellow-800';
+                                                    }
+                                                    echo $statusClass;
+                                                ?>">
+                                                <?= htmlspecialchars($item['status_name']) ?>
+                                            </span>
+                                        </td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                            <a href="detail-order.php?id=<?= urlencode($item['idpurchaseorder']) ?>" class="px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 text-xs inline-block">
+                                                Detail
+                                            </a>                                        </td>
+                                    </tr>
+                                    <?php endforeach; ?>
+                                <?php endif; ?>
+                            </tbody>
+                        </table>
+                    </div>                    
+                    <!-- Pagination -->
+                    <?php if ($total_pages > 1): ?>
+                    <div class="flex items-center justify-between border-t border-gray-200 bg-white px-4 py-3 sm:px-6">
+                        <div class="flex flex-1 justify-between sm:hidden">
+                            <?php if ($page > 1): ?>
+                            <a href="?tab=<?= $activeTab ?>&page=<?= $page - 1 ?><?php if ($selectedYear > 0) echo '&year=' . $selectedYear; ?><?php if ($selectedMonth > 0) echo '&month=' . $selectedMonth; ?><?php if ($search) echo '&search=' . urlencode($search); ?>" class="relative inline-flex items-center rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">Previous</a>
+                            <?php endif; ?>
+                            
+                            <?php if ($page < $total_pages): ?>
+                            <a href="?tab=<?= $activeTab ?>&page=<?= $page + 1 ?><?php if ($selectedYear > 0) echo '&year=' . $selectedYear; ?><?php if ($selectedMonth > 0) echo '&month=' . $selectedMonth; ?><?php if ($search) echo '&search=' . urlencode($search); ?>" class="relative ml-3 inline-flex items-center rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">Next</a>
+                            <?php endif; ?>
+                        </div>
+                        <div class="hidden sm:flex sm:flex-1 sm:items-center sm:justify-between">
+                            <div>
+                                <p class="text-sm text-gray-700">
+                                    Showing <span class="font-medium"><?= $offset + 1 ?></span> to <span class="font-medium"><?= min($offset + $limit, $totalItems) ?></span> of <span class="font-medium"><?= $totalItems ?></span> results
+                                </p>
+                            </div>
+                            <div>
+                                <nav class="isolate inline-flex -space-x-px rounded-md shadow-sm" aria-label="Pagination">
+                                    <?php if ($page > 1): ?>
+                                    <a href="?tab=<?= $activeTab ?>&page=<?= $page - 1 ?><?php if ($selectedYear > 0) echo '&year=' . $selectedYear; ?><?php if ($selectedMonth > 0) echo '&month=' . $selectedMonth; ?><?php if ($search) echo '&search=' . urlencode($search); ?>" class="relative inline-flex items-center rounded-l-md px-2 py-2 text-gray-400 ring-1 ring-inset ring-gray-300 hover:bg-gray-50 focus:z-20 focus:outline-offset-0">
+                                        <span class="sr-only">Previous</span>
+                                        <svg class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                            <path fill-rule="evenodd" d="M12.79 5.23a.75.75 0 01-.02 1.06L8.832 10l3.938 3.71a.75.75 0 11-1.04 1.08l-4.5-4.25a.75.75 0 010-1.08l4.5-4.25a.75.75 0 011.06.02z" clip-rule="evenodd" />
+                                        </svg>
+                                    </a>
+                                    <?php endif; ?>
+                                    
+                                    <?php for ($i = max(1, $page - 2); $i <= min($total_pages, $page + 2); $i++): ?>
+                                    <a href="?tab=<?= $activeTab ?>&page=<?= $i ?><?php if ($selectedYear > 0) echo '&year=' . $selectedYear; ?><?php if ($selectedMonth > 0) echo '&month=' . $selectedMonth; ?><?php if ($search) echo '&search=' . urlencode($search); ?>" class="<?php echo $i == $page ? 'relative z-10 inline-flex items-center bg-indigo-600 px-4 py-2 text-sm font-semibold text-white focus:z-20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600' : 'relative inline-flex items-center px-4 py-2 text-sm font-semibold text-gray-900 ring-1 ring-inset ring-gray-300 hover:bg-gray-50 focus:z-20 focus:outline-offset-0'; ?>">
+                                        <?= $i ?>
+                                    </a>
+                                    <?php endfor; ?>
+                                    
+                                    <?php if ($page < $total_pages): ?>
+                                    <a href="?tab=<?= $activeTab ?>&page=<?= $page + 1 ?><?php if ($selectedYear > 0) echo '&year=' . $selectedYear; ?><?php if ($selectedMonth > 0) echo '&month=' . $selectedMonth; ?><?php if ($search) echo '&search=' . urlencode($search); ?>" class="relative inline-flex items-center rounded-r-md px-2 py-2 text-gray-400 ring-1 ring-inset ring-gray-300 hover:bg-gray-50 focus:z-20 focus:outline-offset-0">
+                                        <span class="sr-only">Next</span>
+                                        <svg class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                                            <path fill-rule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clip-rule="evenodd" />
+                                        </svg>
+                                    </a>
+                                    <?php endif; ?>
+                                </nav>
+                            </div>
+                        </div>
+                    </div>
+                    <?php endif; ?>
+                </div>
+                <?php endif; ?>
+
+            </div>
+        </div>
+
+    </main>
+
+</div>
+
+<script>
+// Tab switching functionality
+function showTab(tabName) {
+    // Build URL with tab parameter
+    let url = `?tab=${tabName}`;
+    
+    // Get current filter parameters if they exist
+    const urlParams = new URLSearchParams(window.location.search);
+    const month = urlParams.get('month');
+    const year = urlParams.get('year');
+    const search = urlParams.get('search');
+    
+    // Add filter parameters if they exist
+    if (month) url += `&month=${encodeURIComponent(month)}`;
+    if (year) url += `&year=${encodeURIComponent(year)}`;
+    if (search) url += `&search=${encodeURIComponent(search)}`;
+    
+    // Navigate to the new URL
+    window.location.href = url;
+}
+
+// Filter functionality
+function filterData() {
+    // Get current tab from URL or default to 'overview'
+    const urlParams = new URLSearchParams(window.location.search);
+    const currentTab = urlParams.get('tab') || 'overview';
+    
+    // Get filter elements for current tab
+    const monthSelect = document.getElementById(`filter-month-${currentTab}`);
+    const yearSelect = document.getElementById(`filter-year-${currentTab}`);
+    
+    // Get selected values
+    const month = monthSelect ? monthSelect.value : '0';
+    const year = yearSelect ? yearSelect.value : '0';
+    
+    // Build URL with parameters
+    let url = `?tab=${currentTab}`;
+    
+    // Add month parameter if it's not '0' (All Months)
+    if (month && month !== '0' && month !== 'All Months') {
+        url += `&month=${encodeURIComponent(month)}`;
+    }
+    
+    // Add year parameter if it's not '0' (All Years)
+    if (year && year !== '0' && year !== 'All Years') {
+        url += `&year=${encodeURIComponent(year)}`;
+    }
+    
+    // Navigate to the new URL
+    window.location.href = url;
+}
+
+// Download report function
+function downloadReport() {
+    alert('Download functionality would be implemented here');
+}
+
+// Chart for Annual Expenditure
+<?php if (!empty($annualExpenditureData)): ?>
+const ctxAnnual = document.getElementById('chartAnnualExpenditure');
+if (ctxAnnual) {
+    new Chart(ctxAnnual, {
+        type: 'bar',
+        data: {
+            labels: <?= json_encode($months) ?>,
+            datasets: [{
+                label: 'Expenditure (Rp)',
+                data: <?= json_encode($monthlyExpenditure) ?>,
+                backgroundColor: '#3b82f6',
+                borderColor: '#2563eb',
+                borderWidth: 1
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    ticks: {
+                        callback: function(value) {
+                            return 'Rp ' + value.toLocaleString();
+                        }
+                    }
+                }
+            },
+            plugins: {
+                legend: {
+                    display: false
+                },
+                tooltip: {
+                    callbacks: {
+                        label: function(context) {
+                            return 'Rp ' + context.parsed.y.toLocaleString();
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+<?php endif; ?>
+
+// Chart for Remain Purchase Request
+<?php if (!empty($prStatusData)): ?>
+const ctxPR = document.getElementById('chartRemainPR');
+if (ctxPR) {
+    new Chart(ctxPR, {
+        type: 'doughnut',
+        data: {
+            labels: <?= json_encode($chartLabels) ?>,
+            datasets: [{
+                data: <?= json_encode($chartData) ?>,
+                backgroundColor: <?= json_encode($chartBackgroundColors) ?>,
+                borderWidth: 2,
+                borderColor: '#ffffff'
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {
+                    position: 'right',
+                    labels: {
+                        padding: 15,
+                        font: {
+                            size: 12
+                        }
+                    }
+                },
+                tooltip: {
+                    callbacks: {
+                        label: function(context) {
+                            return context.label + ': ' + context.parsed + ' PR';
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+<?php endif; ?>
+</script>
+
+</body>
+</html>< ? p h p   e n d i f ;   ? > 
+ < / s c r i p t > 
+ 
+ < ! - -   A d d   P u r c h a s e   R e q u e s t   M o d a l   - - > 
+ < d i v   i d = " a d d R e q u e s t M o d a l "   c l a s s = " m o d a l " > 
+         < d i v   c l a s s = " m o d a l - c o n t e n t " > 
+                 < s p a n   c l a s s = " c l o s e "   o n c l i c k = " c l o s e M o d a l ( \ " a d d R e q u e s t M o d a l \ " ) " > & t i m e s ; < / s p a n > 
+                 < h 2   c l a s s = " t e x t - x l   f o n t - b o l d   m b - 4 " > A d d   N e w   P u r c h a s e   R e q u e s t < / h 2 > 
+                 < f o r m   m e t h o d = " P O S T " > 
+                         < i n p u t   t y p e = " h i d d e n "   n a m e = " a d d _ p u r c h a s e _ r e q u e s t "   v a l u e = " 1 " > 
+                         < d i v   c l a s s = " m b - 4 " > 
+                                 < l a b e l   c l a s s = " b l o c k   t e x t - g r a y - 7 0 0   t e x t - s m   f o n t - b o l d   m b - 2 "   f o r = " n a m a r e q u e s t o r " > 
+                                         R e q u e s t o r   N a m e 
+                                 < / l a b e l > 
+                                 < i n p u t   c l a s s = " s h a d o w   a p p e a r a n c e - n o n e   b o r d e r   r o u n d e d   w - f u l l   p y - 2   p x - 3   t e x t - g r a y - 7 0 0   l e a d i n g - t i g h t   f o c u s : o u t l i n e - n o n e   f o c u s : s h a d o w - o u t l i n e "   
+                                               i d = " n a m a r e q u e s t o r "   n a m e = " n a m a r e q u e s t o r "   t y p e = " t e x t "   r e q u i r e d > 
+                         < / d i v > 
+                         < d i v   c l a s s = " m b - 4 " > 
+                                 < l a b e l   c l a s s = " b l o c k   t e x t - g r a y - 7 0 0   t e x t - s m   f o n t - b o l d   m b - 2 "   f o r = " k e t e r a n g a n " > 
+                                         D e s c r i p t i o n 
+                                 < / l a b e l > 
+                                 < t e x t a r e a   c l a s s = " s h a d o w   a p p e a r a n c e - n o n e   b o r d e r   r o u n d e d   w - f u l l   p y - 2   p x - 3   t e x t - g r a y - 7 0 0   l e a d i n g - t i g h t   f o c u s : o u t l i n e - n o n e   f o c u s : s h a d o w - o u t l i n e "   
+                                                     i d = " k e t e r a n g a n "   n a m e = " k e t e r a n g a n "   r o w s = " 3 "   r e q u i r e d > < / t e x t a r e a > 
+                         < / d i v > 
+                         < d i v   c l a s s = " m b - 4 " > 
+                                 < l a b e l   c l a s s = " b l o c k   t e x t - g r a y - 7 0 0   t e x t - s m   f o n t - b o l d   m b - 2 "   f o r = " t g l _ r e q " > 
+                                         R e q u e s t   D a t e 
+                                 < / l a b e l > 
+                                 < i n p u t   c l a s s = " s h a d o w   a p p e a r a n c e - n o n e   b o r d e r   r o u n d e d   w - f u l l   p y - 2   p x - 3   t e x t - g r a y - 7 0 0   l e a d i n g - t i g h t   f o c u s : o u t l i n e - n o n e   f o c u s : s h a d o w - o u t l i n e "   
+                                               i d = " t g l _ r e q "   n a m e = " t g l _ r e q "   t y p e = " d a t e t i m e - l o c a l "   r e q u i r e d > 
+                         < / d i v > 
+                         < d i v   c l a s s = " m b - 4 " > 
+                                 < l a b e l   c l a s s = " b l o c k   t e x t - g r a y - 7 0 0   t e x t - s m   f o n t - b o l d   m b - 2 "   f o r = " t g l _ b u t u h " > 
+                                         R e q u i r e d   D a t e 
+                                 < / l a b e l > 
+                                 < i n p u t   c l a s s = " s h a d o w   a p p e a r a n c e - n o n e   b o r d e r   r o u n d e d   w - f u l l   p y - 2   p x - 3   t e x t - g r a y - 7 0 0   l e a d i n g - t i g h t   f o c u s : o u t l i n e - n o n e   f o c u s : s h a d o w - o u t l i n e "   
+                                               i d = " t g l _ b u t u h "   n a m e = " t g l _ b u t u h "   t y p e = " d a t e "   r e q u i r e d > 
+                         < / d i v > 
+                         < d i v   c l a s s = " m b - 4 " > 
+                                 < l a b e l   c l a s s = " b l o c k   t e x t - g r a y - 7 0 0   t e x t - s m   f o n t - b o l d   m b - 2 "   f o r = " i d s u p e r v i s o r " > 
+                                         S u p e r v i s o r 
+                                 < / l a b e l > 
+                                 < s e l e c t   c l a s s = " s h a d o w   a p p e a r a n c e - n o n e   b o r d e r   r o u n d e d   w - f u l l   p y - 2   p x - 3   t e x t - g r a y - 7 0 0   l e a d i n g - t i g h t   f o c u s : o u t l i n e - n o n e   f o c u s : s h a d o w - o u t l i n e "   
+                                                 i d = " i d s u p e r v i s o r "   n a m e = " i d s u p e r v i s o r "   r e q u i r e d > 
+                                         < o p t i o n   v a l u e = " " > S e l e c t   S u p e r v i s o r < / o p t i o n > 
+                                         < ? p h p   f o r e a c h   ( $ u s e r s   a s   $ u s e r ) :   ? > 
+                                         < o p t i o n   v a l u e = " < ? =   h t m l s p e c i a l c h a r s ( $ u s e r [ \ " i d u s e r \ " ] )   ? > " > 
+                                                 < ? =   h t m l s p e c i a l c h a r s ( $ u s e r [ \ " n a m a \ " ] )   ? > 
+                                         < / o p t i o n > 
+                                         < ? p h p   e n d f o r e a c h ;   ? > 
+                                 < / s e l e c t > 
+                         < / d i v > 
+                         < d i v   c l a s s = " f l e x   i t e m s - c e n t e r   j u s t i f y - b e t w e e n " > 
+                                 < b u t t o n   t y p e = " b u t t o n "   o n c l i c k = " c l o s e M o d a l ( \ " a d d R e q u e s t M o d a l \ " ) "   c l a s s = " b g - g r a y - 5 0 0   h o v e r : b g - g r a y - 7 0 0   t e x t - w h i t e   f o n t - b o l d   p y - 2   p x - 4   r o u n d e d   f o c u s : o u t l i n e - n o n e   f o c u s : s h a d o w - o u t l i n e " > 
+                                         C a n c e l 
+                                 < / b u t t o n > 
+                                 < b u t t o n   t y p e = " s u b m i t "   c l a s s = " b g - b l u e - 5 0 0   h o v e r : b g - b l u e - 7 0 0   t e x t - w h i t e   f o n t - b o l d   p y - 2   p x - 4   r o u n d e d   f o c u s : o u t l i n e - n o n e   f o c u s : s h a d o w - o u t l i n e " > 
+                                         C r e a t e   R e q u e s t 
+                                 < / b u t t o n > 
+                         < / d i v > 
+                 < / f o r m > 
+         < / d i v > 
+ < / d i v > 
+ 
+ < ! - -   E d i t   P u r c h a s e   R e q u e s t   M o d a l   - - > 
+ < d i v   i d = " e d i t R e q u e s t M o d a l "   c l a s s = " m o d a l " > 
+         < d i v   c l a s s = " m o d a l - c o n t e n t " > 
+                 < s p a n   c l a s s = " c l o s e "   o n c l i c k = " c l o s e M o d a l ( \ " e d i t R e q u e s t M o d a l \ " ) " > & t i m e s ; < / s p a n > 
+                 < h 2   c l a s s = " t e x t - x l   f o n t - b o l d   m b - 4 " > E d i t   P u r c h a s e   R e q u e s t < / h 2 > 
+                 < f o r m   m e t h o d = " P O S T "   i d = " e d i t R e q u e s t F o r m " > 
+                         < i n p u t   t y p e = " h i d d e n "   n a m e = " e d i t _ p u r c h a s e _ r e q u e s t "   v a l u e = " 1 " > 
+                         < i n p u t   t y p e = " h i d d e n "   n a m e = " i d r e q u e s t "   i d = " e d i t _ i d r e q u e s t " > 
+                         < d i v   c l a s s = " m b - 4 " > 
+                                 < l a b e l   c l a s s = " b l o c k   t e x t - g r a y - 7 0 0   t e x t - s m   f o n t - b o l d   m b - 2 "   f o r = " e d i t _ n a m a r e q u e s t o r " > 
+                                         R e q u e s t o r   N a m e 
+                                 < / l a b e l > 
+                                 < i n p u t   c l a s s = " s h a d o w   a p p e a r a n c e - n o n e   b o r d e r   r o u n d e d   w - f u l l   p y - 2   p x - 3   t e x t - g r a y - 7 0 0   l e a d i n g - t i g h t   f o c u s : o u t l i n e - n o n e   f o c u s : s h a d o w - o u t l i n e "   
+                                               i d = " e d i t _ n a m a r e q u e s t o r "   n a m e = " n a m a r e q u e s t o r "   t y p e = " t e x t "   r e q u i r e d > 
+                         < / d i v > 
+                         < d i v   c l a s s = " m b - 4 " > 
+                                 < l a b e l   c l a s s = " b l o c k   t e x t - g r a y - 7 0 0   t e x t - s m   f o n t - b o l d   m b - 2 "   f o r = " e d i t _ k e t e r a n g a n " > 
+                                         D e s c r i p t i o n 
+                                 < / l a b e l > 
+                                 < t e x t a r e a   c l a s s = " s h a d o w   a p p e a r a n c e - n o n e   b o r d e r   r o u n d e d   w - f u l l   p y - 2   p x - 3   t e x t - g r a y - 7 0 0   l e a d i n g - t i g h t   f o c u s : o u t l i n e - n o n e   f o c u s : s h a d o w - o u t l i n e "   
+                                                     i d = " e d i t _ k e t e r a n g a n "   n a m e = " k e t e r a n g a n "   r o w s = " 3 "   r e q u i r e d > < / t e x t a r e a > 
+                         < / d i v > 
+                         < d i v   c l a s s = " m b - 4 " > 
+                                 < l a b e l   c l a s s = " b l o c k   t e x t - g r a y - 7 0 0   t e x t - s m   f o n t - b o l d   m b - 2 "   f o r = " e d i t _ t g l _ r e q " > 
+                                         R e q u e s t   D a t e 
+                                 < / l a b e l > 
+                                 < i n p u t   c l a s s = " s h a d o w   a p p e a r a n c e - n o n e   b o r d e r   r o u n d e d   w - f u l l   p y - 2   p x - 3   t e x t - g r a y - 7 0 0   l e a d i n g - t i g h t   f o c u s : o u t l i n e - n o n e   f o c u s : s h a d o w - o u t l i n e "   
+                                               i d = " e d i t _ t g l _ r e q "   n a m e = " t g l _ r e q "   t y p e = " d a t e t i m e - l o c a l "   r e q u i r e d > 
+                         < / d i v > 
+                         < d i v   c l a s s = " m b - 4 " > 
+                                 < l a b e l   c l a s s = " b l o c k   t e x t - g r a y - 7 0 0   t e x t - s m   f o n t - b o l d   m b - 2 "   f o r = " e d i t _ t g l _ b u t u h " > 
+                                         R e q u i r e d   D a t e 
+                                 < / l a b e l > 
+                                 < i n p u t   c l a s s = " s h a d o w   a p p e a r a n c e - n o n e   b o r d e r   r o u n d e d   w - f u l l   p y - 2   p x - 3   t e x t - g r a y - 7 0 0   l e a d i n g - t i g h t   f o c u s : o u t l i n e - n o n e   f o c u s : s h a d o w - o u t l i n e "   
+                                               i d = " e d i t _ t g l _ b u t u h "   n a m e = " t g l _ b u t u h "   t y p e = " d a t e "   r e q u i r e d > 
+                         < / d i v > 
+                         < d i v   c l a s s = " m b - 4 " > 
+                                 < l a b e l   c l a s s = " b l o c k   t e x t - g r a y - 7 0 0   t e x t - s m   f o n t - b o l d   m b - 2 "   f o r = " e d i t _ i d s u p e r v i s o r " > 
+                                         S u p e r v i s o r 
+                                 < / l a b e l > 
+                                 < s e l e c t   c l a s s = " s h a d o w   a p p e a r a n c e - n o n e   b o r d e r   r o u n d e d   w - f u l l   p y - 2   p x - 3   t e x t - g r a y - 7 0 0   l e a d i n g - t i g h t   f o c u s : o u t l i n e - n o n e   f o c u s : s h a d o w - o u t l i n e "   
+                                                 i d = " e d i t _ i d s u p e r v i s o r "   n a m e = " i d s u p e r v i s o r "   r e q u i r e d > 
+                                         < o p t i o n   v a l u e = " " > S e l e c t   S u p e r v i s o r < / o p t i o n > 
+                                         < ? p h p   f o r e a c h   ( $ u s e r s   a s   $ u s e r ) :   ? > 
+                                         < o p t i o n   v a l u e = " < ? =   h t m l s p e c i a l c h a r s ( $ u s e r [ \ " i d u s e r \ " ] )   ? > " > 
+                                                 < ? =   h t m l s p e c i a l c h a r s ( $ u s e r [ \ " n a m a \ " ] )   ? > 
+                                         < / o p t i o n > 
+                                         < ? p h p   e n d f o r e a c h ;   ? > 
+                                 < / s e l e c t > 
+                         < / d i v > 
+                         < d i v   c l a s s = " f l e x   i t e m s - c e n t e r   j u s t i f y - b e t w e e n " > 
+                                 < b u t t o n   t y p e = " b u t t o n "   o n c l i c k = " c l o s e M o d a l ( \ " e d i t R e q u e s t M o d a l \ " ) "   c l a s s = " b g - g r a y - 5 0 0   h o v e r : b g - g r a y - 7 0 0   t e x t - w h i t e   f o n t - b o l d   p y - 2   p x - 4   r o u n d e d   f o c u s : o u t l i n e - n o n e   f o c u s : s h a d o w - o u t l i n e " > 
+                                         C a n c e l 
+                                 < / b u t t o n > 
+                                 < b u t t o n   t y p e = " s u b m i t "   c l a s s = " b g - b l u e - 5 0 0   h o v e r : b g - b l u e - 7 0 0   t e x t - w h i t e   f o n t - b o l d   p y - 2   p x - 4   r o u n d e d   f o c u s : o u t l i n e - n o n e   f o c u s : s h a d o w - o u t l i n e " > 
+                                         U p d a t e   R e q u e s t 
+                                 < / b u t t o n > 
+                         < / d i v > 
+                 < / f o r m > 
+         < / d i v > 
+ < / d i v > 
+ 
+ < s c r i p t > 
+ / /   M o d a l   f u n c t i o n s 
+ f u n c t i o n   o p e n A d d R e q u e s t M o d a l ( )   { 
+         / /   S e t   c u r r e n t   d a t e t i m e   a s   d e f a u l t 
+         c o n s t   n o w   =   n e w   D a t e ( ) ; 
+         c o n s t   y e a r   =   n o w . g e t F u l l Y e a r ( ) ; 
+         c o n s t   m o n t h   =   S t r i n g ( n o w . g e t M o n t h ( )   +   1 ) . p a d S t a r t ( 2 ,   \ " 0 \ " ) ; 
+         c o n s t   d a y   =   S t r i n g ( n o w . g e t D a t e ( ) ) . p a d S t a r t ( 2 ,   \ " 0 \ " ) ; 
+         c o n s t   h o u r s   =   S t r i n g ( n o w . g e t H o u r s ( ) ) . p a d S t a r t ( 2 ,   \ " 0 \ " ) ; 
+         c o n s t   m i n u t e s   =   S t r i n g ( n o w . g e t M i n u t e s ( ) ) . p a d S t a r t ( 2 ,   \ " 0 \ " ) ; 
+         c o n s t   f o r m a t t e d D a t e T i m e   =   ` $ { y e a r } - $ { m o n t h } - $ { d a y } T $ { h o u r s } : $ { m i n u t e s } ` ; 
+         
+         d o c u m e n t . g e t E l e m e n t B y I d ( \ " t g l _ r e q \ " ) . v a l u e   =   f o r m a t t e d D a t e T i m e ; 
+         d o c u m e n t . g e t E l e m e n t B y I d ( \ " a d d R e q u e s t M o d a l \ " ) . s t y l e . d i s p l a y   =   \ " b l o c k \ " ; 
+ } 
+ 
+ f u n c t i o n   o p e n E d i t R e q u e s t M o d a l ( r e q u e s t D a t a )   { 
+         / /   P o p u l a t e   t h e   f o r m   w i t h   r e q u e s t   d a t a 
+         d o c u m e n t . g e t E l e m e n t B y I d ( \ " e d i t _ i d r e q u e s t \ " ) . v a l u e   =   r e q u e s t D a t a . i d r e q u e s t ; 
+         d o c u m e n t . g e t E l e m e n t B y I d ( \ " e d i t _ n a m a r e q u e s t o r \ " ) . v a l u e   =   r e q u e s t D a t a . n a m a r e q u e s t o r   | |   \ " \ " ; 
+         d o c u m e n t . g e t E l e m e n t B y I d ( \ " e d i t _ k e t e r a n g a n \ " ) . v a l u e   =   r e q u e s t D a t a . k e t e r a n g a n   | |   \ " \ " ; 
+         d o c u m e n t . g e t E l e m e n t B y I d ( \ " e d i t _ t g l _ r e q \ " ) . v a l u e   =   r e q u e s t D a t a . t g l _ r e q   | |   \ " \ " ; 
+         d o c u m e n t . g e t E l e m e n t B y I d ( \ " e d i t _ t g l _ b u t u h \ " ) . v a l u e   =   r e q u e s t D a t a . t g l _ b u t u h   | |   \ " \ " ; 
+         d o c u m e n t . g e t E l e m e n t B y I d ( \ " e d i t _ i d s u p e r v i s o r \ " ) . v a l u e   =   r e q u e s t D a t a . i d s u p e r v i s o r   | |   \ " \ " ; 
+         
+         d o c u m e n t . g e t E l e m e n t B y I d ( \ " e d i t R e q u e s t M o d a l \ " ) . s t y l e . d i s p l a y   =   \ " b l o c k \ " ; 
+ } 
+ 
+ f u n c t i o n   c l o s e M o d a l ( m o d a l I d )   { 
+         d o c u m e n t . g e t E l e m e n t B y I d ( m o d a l I d ) . s t y l e . d i s p l a y   =   \ " n o n e \ " ; 
+ } 
+ 
+ / /   C l o s e   m o d a l   w h e n   c l i c k i n g   o u t s i d e   o f   i t 
+ w i n d o w . o n c l i c k   =   f u n c t i o n ( e v e n t )   { 
+         i f   ( e v e n t . t a r g e t . c l a s s L i s t . c o n t a i n s ( \ " m o d a l \ " ) )   { 
+                 e v e n t . t a r g e t . s t y l e . d i s p l a y   =   \ " n o n e \ " ; 
+         } 
+ } 
+ 
+ / /   A d d   e v e n t   l i s t e n e r s   t o   t h e   b u t t o n s 
+ d o c u m e n t . a d d E v e n t L i s t e n e r ( \ " D O M C o n t e n t L o a d e d \ " ,   f u n c t i o n ( )   { 
+         / /   A d d   b u t t o n   i n   p u r c h a s e   r e q u e s t   t a b 
+         c o n s t   a d d P r B u t t o n   =   d o c u m e n t . g e t E l e m e n t B y I d ( \ " a d d - p r - b u t t o n \ " ) ; 
+         i f   ( a d d P r B u t t o n )   { 
+                 a d d P r B u t t o n . a d d E v e n t L i s t e n e r ( \ " c l i c k \ " ,   o p e n A d d R e q u e s t M o d a l ) ; 
+         } 
+         
+         / /   E d i t   b u t t o n   i n   p u r c h a s e   r e q u e s t   t a b 
+         c o n s t   e d i t P r B u t t o n   =   d o c u m e n t . g e t E l e m e n t B y I d ( \ " e d i t - p r - b u t t o n \ " ) ; 
+         i f   ( e d i t P r B u t t o n )   { 
+                 e d i t P r B u t t o n . a d d E v e n t L i s t e n e r ( \ " c l i c k \ " ,   f u n c t i o n ( )   { 
+                         a l e r t ( \ " P l e a s e   s e l e c t   a   p u r c h a s e   r e q u e s t   t o   e d i t   f r o m   t h e   t a b l e   b e l o w . \ " ) ; 
+                 } ) ; 
+         } 
+ } ) ; 
+ < / s c r i p t > 
+ 
+ < / b o d y > 
+ < / h t m l >  
+ 
