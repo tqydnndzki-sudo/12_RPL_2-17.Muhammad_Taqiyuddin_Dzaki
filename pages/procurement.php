@@ -38,6 +38,36 @@ $auth->checkAccess();
 
 // Initialize variables
 $activeTab = isset($_GET['tab']) ? $_GET['tab'] : 'overview';
+$statusFilter = isset($_GET['status']) ? $_GET['status'] : '';
+$poStatusFilter = isset($_GET['po_status']) ? $_GET['po_status'] : '';
+
+// Sorting variables for Purchase Request
+$prSort = isset($_GET['pr_sort']) ? $_GET['pr_sort'] : 'tgl_req';
+$prOrder = isset($_GET['pr_order']) ? $_GET['pr_order'] : 'DESC';
+$allowedPRSort = ['idrequest', 'tgl_req', 'namarequestor', 'status_code', 'total_items', 'total_amount'];
+if (!in_array($prSort, $allowedPRSort)) $prSort = 'tgl_req';
+$prOrder = strtoupper($prOrder) === 'ASC' ? 'ASC' : 'DESC';
+
+// Generate ORDER BY clause for PR (handle aggregate columns)
+$prOrderBy = match($prSort) {
+    'total_items' => "COUNT(dr.iddetailrequest) $prOrder",
+    'total_amount' => "SUM(dr.total) $prOrder",
+    'status_code' => "COALESCE(ls.status, 0) $prOrder",
+    default => "pr.$prSort $prOrder"
+};
+
+// Sorting variables for Purchase Order
+$poSort = isset($_GET['po_sort']) ? $_GET['po_sort'] : 'tgl_po';
+$poOrder = isset($_GET['po_order']) ? $_GET['po_order'] : 'DESC';
+$allowedPOSort = ['idpurchaseorder', 'tgl_po', 'supplier', 'status'];
+if (!in_array($poSort, $allowedPOSort)) $poSort = 'tgl_po';
+$poOrder = strtoupper($poOrder) === 'ASC' ? 'ASC' : 'DESC';
+
+// Generate ORDER BY clause for PO (handle status column)
+$poOrderBy = match($poSort) {
+    'status' => "COALESCE(lso.status, 0) $poOrder",
+    default => "po.$poSort $poOrder"
+};
 
 // Fetch users for supervisor dropdown
 $qUsers = $pdo->prepare("SELECT iduser, nama FROM users WHERE roletype IN ('Leader', 'Manager') ORDER BY nama");
@@ -500,7 +530,11 @@ if (isset($_GET['month']) && $_GET['month'] !== '' && $_GET['month'] !== '0' && 
 
 $search = $_GET['search'] ?? '';
 $page = isset($_GET['page']) ? (int)$_GET['page'] : 1;
-$limit = 25;
+$limit = isset($_GET['limit']) ? (int)$_GET['limit'] : 25;
+// Ensure limit is one of the allowed values
+if (!in_array($limit, [10, 25, 50, 100])) {
+    $limit = 25;
+}
 $offset = ($page - 1) * $limit;
 
 // Query untuk Overview - Total Amount Purchase Order
@@ -738,12 +772,28 @@ if ($activeTab == 'purchase-request') {
         $dateFilter .= " AND MONTH(pr.tgl_req) = :month";
     }
     
+    // Tambahkan filter status
+    $statusCondition = "";
+    if ($statusFilter !== '') {
+        $statusCondition .= " AND COALESCE(ls.status, 0) = :status";
+    }
+    
     $countQuery = "SELECT COUNT(*) FROM purchaserequest pr 
-                   WHERE 1=1 $searchCondition $dateFilter";
+                   LEFT JOIN (
+                       SELECT idrequest, status
+                       FROM (
+                           SELECT idrequest, status,
+                                  ROW_NUMBER() OVER (PARTITION BY idrequest ORDER BY date DESC) as rn
+                           FROM logstatusreq
+                       ) ranked
+                       WHERE rn = 1
+                   ) ls ON pr.idrequest = ls.idrequest
+                   WHERE 1=1 $searchCondition $dateFilter $statusCondition";
     $countStmt = $pdo->prepare($countQuery);
     if ($search) $countStmt->bindValue(':search', "%$search%");
     if ($selectedYear > 0) $countStmt->bindValue(':year', $selectedYear, PDO::PARAM_INT);
     if ($selectedMonth > 0) $countStmt->bindValue(':month', $selectedMonth, PDO::PARAM_INT);
+    if ($statusFilter !== '') $countStmt->bindValue(':status', $statusFilter, PDO::PARAM_INT);
     $countStmt->execute();
     $totalItems = $countStmt->fetchColumn();
     $total_pages = ceil($totalItems / $limit);
@@ -766,36 +816,29 @@ if ($activeTab == 'purchase-request') {
                 WHEN 6 THEN 'Done'
                 ELSE 'Pending'
             END as status_name,
-            GROUP_CONCAT(dr.idbarang SEPARATOR ', ') as idbarang,
-            GROUP_CONCAT(mb.kodebarang SEPARATOR ', ') as kodebarang,
-            GROUP_CONCAT(mb.satuan SEPARATOR ', ') as satuan,
-            GROUP_CONCAT(dr.linkpembelian SEPARATOR ', ') as linkpembelian,
-            GROUP_CONCAT(dr.namaitem SEPARATOR ', ') as namaitem,
-            GROUP_CONCAT(dr.deskripsi SEPARATOR ', ') as deskripsi,
-            GROUP_CONCAT(dr.harga SEPARATOR ', ') as harga,
-            GROUP_CONCAT(dr.qty SEPARATOR ', ') as qty,
-            GROUP_CONCAT(dr.total SEPARATOR ', ') as total,
-            GROUP_CONCAT(dr.kodeproject SEPARATOR ', ') as kodeproject
+            ls.note_reject,
+            COUNT(dr.iddetailrequest) as total_items,
+            SUM(dr.total) as total_amount
         FROM purchaserequest pr
         LEFT JOIN (
-            SELECT idrequest, status
+            SELECT idrequest, status, note_reject
             FROM (
-                SELECT idrequest, status,
+                SELECT idrequest, status, note_reject,
                        ROW_NUMBER() OVER (PARTITION BY idrequest ORDER BY date DESC) as rn
                 FROM logstatusreq
             ) ranked
             WHERE rn = 1
         ) ls ON pr.idrequest = ls.idrequest
         LEFT JOIN detailrequest dr ON pr.idrequest = dr.idrequest
-        LEFT JOIN m_barang mb ON dr.idbarang = mb.idbarang
-        WHERE 1=1 $searchCondition $dateFilter
-        GROUP BY pr.idrequest, pr.tgl_req, pr.tgl_butuh, pr.namarequestor, pr.keterangan, pr.idsupervisor, ls.status
-        ORDER BY pr.tgl_req DESC
+        WHERE 1=1 $searchCondition $dateFilter $statusCondition
+        GROUP BY pr.idrequest, pr.tgl_req, pr.tgl_butuh, pr.namarequestor, pr.keterangan, pr.idsupervisor, ls.status, ls.note_reject
+        ORDER BY $prOrderBy
         LIMIT :limit OFFSET :offset
     ");
     if ($search) $stmt->bindValue(':search', "%$search%");
     if ($selectedYear > 0) $stmt->bindValue(':year', $selectedYear, PDO::PARAM_INT);
     if ($selectedMonth > 0) $stmt->bindValue(':month', $selectedMonth, PDO::PARAM_INT);
+    if ($statusFilter !== '') $stmt->bindValue(':status', $statusFilter, PDO::PARAM_INT);
     $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
     $stmt->bindValue(':offset', $offset, PDO::PARAM_INT);
     $stmt->execute();
@@ -813,12 +856,28 @@ if ($activeTab == 'purchase-request') {
         $dateFilter .= " AND MONTH(po.tgl_po) = :month";
     }
     
+    // Tambahkan filter status untuk PO
+    $poStatusCondition = "";
+    if ($poStatusFilter !== '') {
+        $poStatusCondition .= " AND COALESCE(lso.status, 'Pending') = :po_status";
+    }
+    
     $countQuery = "SELECT COUNT(*) FROM purchaseorder po 
-                   WHERE 1=1 $searchCondition $dateFilter";
+                   LEFT JOIN (
+                       SELECT idpurchaseorder, status
+                       FROM logstatusorder l1
+                       WHERE l1.date = (
+                           SELECT MAX(l2.date)
+                           FROM logstatusorder l2
+                           WHERE l2.idpurchaseorder = l1.idpurchaseorder
+                       )
+                   ) lso ON po.idpurchaseorder = lso.idpurchaseorder
+                   WHERE 1=1 $searchCondition $dateFilter $poStatusCondition";
     $countStmt = $pdo->prepare($countQuery);
     if ($search) $countStmt->bindValue(':search', "%$search%");
     if ($selectedYear > 0) $countStmt->bindValue(':year', $selectedYear, PDO::PARAM_INT);
     if ($selectedMonth > 0) $countStmt->bindValue(':month', $selectedMonth, PDO::PARAM_INT);
+    if ($poStatusFilter !== '') $countStmt->bindValue(':po_status', $poStatusFilter);
     $countStmt->execute();
     $totalItems = $countStmt->fetchColumn();
     $total_pages = ceil($totalItems / $limit);
@@ -830,25 +889,27 @@ if ($activeTab == 'purchase-request') {
             po.supplier,
             pr.idrequest,
             pr.keterangan,
-            COALESCE(lso.status, 'Pending') as status_name
+            COALESCE(lso.status, 'Pending') as status_name,
+            lso.keterangan as po_note_reject
         FROM purchaseorder po
         LEFT JOIN purchaserequest pr ON po.idrequest = pr.idrequest
         LEFT JOIN (
-            SELECT idpurchaseorder, status
-            FROM (
-                SELECT idpurchaseorder, status,
-                       ROW_NUMBER() OVER (PARTITION BY idpurchaseorder ORDER BY date DESC) as rn
-                FROM logstatusorder
-            ) ranked
-            WHERE rn = 1
+            SELECT idpurchaseorder, status, keterangan
+            FROM logstatusorder l1
+            WHERE l1.date = (
+                SELECT MAX(l2.date)
+                FROM logstatusorder l2
+                WHERE l2.idpurchaseorder = l1.idpurchaseorder
+            )
         ) lso ON po.idpurchaseorder = lso.idpurchaseorder
-        WHERE 1=1 $searchCondition $dateFilter
-        ORDER BY po.tgl_po DESC
+        WHERE 1=1 $searchCondition $dateFilter $poStatusCondition
+        ORDER BY $poOrderBy
         LIMIT :limit OFFSET :offset
     ");
     if ($search) $stmt->bindValue(':search', "%$search%");
     if ($selectedYear > 0) $stmt->bindValue(':year', $selectedYear, PDO::PARAM_INT);
     if ($selectedMonth > 0) $stmt->bindValue(':month', $selectedMonth, PDO::PARAM_INT);
+    if ($poStatusFilter !== '') $stmt->bindValue(':po_status', $poStatusFilter);
     $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
     $stmt->bindValue(':offset', $offset, PDO::PARAM_INT);
     $stmt->execute();
@@ -865,11 +926,102 @@ $title = 'Procurement';
     <title>Procurement - Internal Management System</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
         body {
             font-family: 'Inter', sans-serif;
         }
+        
+        /* Enhanced Table Styling */
+        #purchase-request-table thead th,
+        #purchase-order-table thead th {
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            border-bottom: 2px solid #e5e7eb;
+            transition: background-color 0.2s ease;
+        }
+        
+        #purchase-request-table thead th a,
+        #purchase-order-table thead th a {
+            text-decoration: none;
+            color: inherit;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        #purchase-request-table thead th a:hover,
+        #purchase-order-table thead th a:hover {
+            color: #2563eb;
+        }
+        
+        #purchase-request-table tbody tr,
+        #purchase-order-table tbody tr {
+            transition: all 0.15s ease-in-out;
+        }
+        
+        #purchase-request-table tbody tr:hover,
+        #purchase-order-table tbody tr:hover {
+            background-color: #eff6ff;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+        }
+        
+        #purchase-request-table tbody td,
+        #purchase-order-table tbody td {
+            vertical-align: middle;
+            padding: 1rem 1.5rem;
+        }
+        
+        /* Status Badge Enhancement */
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 0.375rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+        }
+        
+        /* Action Button Styling */
+        .action-btn {
+            display: inline-flex;
+            align-items: center;
+            padding: 0.375rem 0.75rem;
+            border-radius: 0.5rem;
+            font-size: 0.75rem;
+            font-weight: 500;
+            transition: all 0.15s ease-in-out;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+        }
+        
+        .action-btn:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+        
+        /* Table Container Enhancement */
+        .table-container {
+            border-radius: 0.75rem;
+            border: 1px solid #e5e7eb;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+        }
+        
+        /* Zebra Striping */
+        #purchase-request-table tbody tr:nth-child(even),
+        #purchase-order-table tbody tr:nth-child(even) {
+            background-color: #f9fafb;
+        }
+        
+        #purchase-request-table tbody tr:nth-child(even):hover,
+        #purchase-order-table tbody tr:nth-child(even):hover {
+            background-color: #eff6ff;
+        }
+        
+        /* Table styles are handled by Tailwind CSS */
     </style>
 </head>
 <body class="bg-gray-50">
@@ -1093,7 +1245,7 @@ $title = 'Procurement';
                                         <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Progress</th>
                                     </tr>
                                 </thead>
-                                <tbody class="bg-white divide-y divide-gray-200">
+                                <tbody class="bg-white divide-y divide-gray-100">
                                     <?php if (empty($progressPRData)): ?>
                                         <tr>
                                             <td colspan="6" class="px-6 py-4 text-center text-gray-500">
@@ -1147,9 +1299,10 @@ $title = 'Procurement';
                 <!-- PURCHASE REQUEST TAB -->
                 <?php if ($activeTab == 'purchase-request'): ?>
                 <div>
-                    <!-- Toolbar -->
-                    <div class="flex justify-between items-center mb-6">
+                    <!-- Action Buttons Row -->
+                    <div class="flex justify-start items-center mb-4">
                         <div class="flex gap-2">
+                            <?php if ($_SESSION['role'] === 'Admin' || $_SESSION['role'] === 'Procurement' || $_SESSION['role'] === 'Leader' || $_SESSION['role'] === 'Manager'): ?>
                             <button onclick="showAddForm()" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center gap-2">
                                 <i class="fas fa-plus"></i>
                                 Add
@@ -1158,60 +1311,120 @@ $title = 'Procurement';
                                 <i class="fas fa-edit"></i>
                                 Edit
                             </button>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                    
+                    <!-- Toolbar with Entries, Search, and Filter -->
+                    <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 gap-4">
+                        <div class="flex flex-wrap items-center gap-4">
+                            <!-- Entries Dropdown -->
+                            <div class="flex items-center gap-2">
+                                <label class="text-sm text-gray-700 font-medium">Show</label>
+                                <select id="entries-pr" onchange="changeEntries('pr')" class="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+                                    <option value="10" <?= $limit == 10 ? 'selected' : '' ?>>10</option>
+                                    <option value="25" <?= $limit == 25 ? 'selected' : '' ?>>25</option>
+                                    <option value="50" <?= $limit == 50 ? 'selected' : '' ?>>50</option>
+                                    <option value="100" <?= $limit == 100 ? 'selected' : '' ?>>100</option>
+                                </select>
+                                <span class="text-sm text-gray-700">entries</span>
+                            </div>
                         </div>
                         
-                        <div class="flex gap-4 items-center">
+                        <div class="flex flex-wrap items-center gap-4">
+                            <!-- Search Input -->
                             <div class="relative">
-                                <input type="text" id="search-<?= $activeTab ?>" placeholder="Search..." class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-64" onkeyup="handleSearch(event)">
-                                <button onclick="performSearch()" class="absolute right-3 top-2.5 text-gray-400 hover:text-gray-600">
-                                    <i class="fas fa-search"></i>
+                                <input type="text" id="search-pr" placeholder="Search..." onkeyup="searchTable('pr')" class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-64">
+                                <button onclick="clearSearch('pr')" class="absolute right-3 top-2.5 text-gray-400 hover:text-gray-600">
+                                    <i class="fas fa-times"></i>
                                 </button>
                             </div>
                             
-                            <div>
-                                <select onchange="filterData()" id="filter-month-<?= $activeTab ?>" class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-32">
-                                    <option value="0" <?= $selectedMonth == 0 ? 'selected' : '' ?>>All Months</option>
-                                    <?php for($m = 1; $m <= 12; $m++): ?>
-                                    <option value="<?= $m ?>" <?= $selectedMonth == $m ? 'selected' : '' ?>><?= date('F', mktime(0, 0, 0, $m, 1)) ?></option>
-                                    <?php endfor; ?>
-                                </select>
-                            </div>
-                            
-                            <div>
-                                <select onchange="filterData()" id="filter-year-<?= $activeTab ?>" class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-32">
-                                    <option value="0" <?= $selectedYear == 0 ? 'selected' : '' ?>>All Years</option>
-                                    <?php for($y = date('Y'); $y >= 2020; $y--): ?>
-                                    <option value="<?= $y ?>" <?= $selectedYear == $y ? 'selected' : '' ?>><?= $y ?></option>
-                                    <?php endfor; ?>
-                                </select>
-                            </div>
+                            <!-- Status Filter -->
+                            <select id="status-filter-pr" onchange="filterTableByStatus('pr')" class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+                                <option value="">All Status</option>
+                                <option value="Pending">Pending</option>
+                                <option value="Process Leader">🟡 Process Leader</option>
+                                <option value="Process Manager">🔵 Process Manager</option>
+                                <option value="Approved">🟢 Approved</option>
+                                <option value="Ordered">🟠 Ordered</option>
+                                <option value="Reject">🔴 Reject</option>
+                                <option value="Done">✅ Done</option>
+                            </select>
                         </div>
                     </div>                    <!-- Table -->
-                    <div class="overflow-x-auto">
+                    <div class="overflow-x-auto rounded-lg border border-gray-200 shadow-sm table-container">
                         <table id="purchase-request-table" class="min-w-full divide-y divide-gray-200">
-                            <thead class="bg-gray-50">
+                            <thead class="bg-gradient-to-r from-blue-50 to-indigo-50">
                                 <tr>
                                     <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" width="50">#</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID Request</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Tanggal Request</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Nama Requestor</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Keterangan</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID Barang</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Link Pembelian</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Nama Item</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Deskripsi</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Harga</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Qty</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Total</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Kode Project</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Action</th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200">
+                                        <a href="?tab=purchase-request&pr_sort=idrequest&pr_order=<?= $prSort === 'idrequest' && $prOrder === 'ASC' ? 'DESC' : 'ASC' ?>&<?= http_build_query(array_filter(['year' => $selectedYear > 0 ? $selectedYear : null, 'month' => $selectedMonth > 0 ? $selectedMonth : null, 'search' => $search, 'status' => $statusFilter])) ?>" class="hover:text-blue-600">
+                                            <span class="font-semibold">ID Request</span>
+                                            <?php if ($prSort === 'idrequest'): ?>
+                                                <i class="fas fa-sort-<?= $prOrder === 'ASC' ? 'up' : 'down' ?> sort-arrow sort-active"></i>
+                                            <?php else: ?>
+                                                <i class="fas fa-sort sort-arrow text-gray-400"></i>
+                                            <?php endif; ?>
+                                        </a>
+                                    </th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200">
+                                        <a href="?tab=purchase-request&pr_sort=tgl_req&pr_order=<?= $prSort === 'tgl_req' && $prOrder === 'ASC' ? 'DESC' : 'ASC' ?>&<?= http_build_query(array_filter(['year' => $selectedYear > 0 ? $selectedYear : null, 'month' => $selectedMonth > 0 ? $selectedMonth : null, 'search' => $search, 'status' => $statusFilter])) ?>" class="hover:text-blue-600 inline-flex items-center gap-1 font-semibold">
+                                            Tanggal
+                                            <?php if ($prSort === 'tgl_req'): ?>
+                                                <i class="fas fa-sort-<?= $prOrder === 'ASC' ? 'up' : 'down' ?> text-blue-600 ml-1"></i>
+                                            <?php else: ?>
+                                                <i class="fas fa-sort text-gray-400 ml-1"></i>
+                                            <?php endif; ?>
+                                        </a>
+                                    </th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200">
+                                        <a href="?tab=purchase-request&pr_sort=namarequestor&pr_order=<?= $prSort === 'namarequestor' && $prOrder === 'ASC' ? 'DESC' : 'ASC' ?>&<?= http_build_query(array_filter(['year' => $selectedYear > 0 ? $selectedYear : null, 'month' => $selectedMonth > 0 ? $selectedMonth : null, 'search' => $search, 'status' => $statusFilter])) ?>" class="hover:text-blue-600 inline-flex items-center gap-1 font-semibold">
+                                            Requestor
+                                            <?php if ($prSort === 'namarequestor'): ?>
+                                                <i class="fas fa-sort-<?= $prOrder === 'ASC' ? 'up' : 'down' ?> text-blue-600 ml-1"></i>
+                                            <?php else: ?>
+                                                <i class="fas fa-sort text-gray-400 ml-1"></i>
+                                            <?php endif; ?>
+                                        </a>
+                                    </th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200">
+                                        <a href="?tab=purchase-request&pr_sort=total_items&pr_order=<?= $prSort === 'total_items' && $prOrder === 'ASC' ? 'DESC' : 'ASC' ?>&<?= http_build_query(array_filter(['year' => $selectedYear > 0 ? $selectedYear : null, 'month' => $selectedMonth > 0 ? $selectedMonth : null, 'search' => $search, 'status' => $statusFilter])) ?>" class="hover:text-blue-600 inline-flex items-center gap-1 font-semibold">
+                                            Total Items
+                                            <?php if ($prSort === 'total_items'): ?>
+                                                <i class="fas fa-sort-<?= $prOrder === 'ASC' ? 'up' : 'down' ?> text-blue-600 ml-1"></i>
+                                            <?php else: ?>
+                                                <i class="fas fa-sort text-gray-400 ml-1"></i>
+                                            <?php endif; ?>
+                                        </a>
+                                    </th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200">
+                                        <a href="?tab=purchase-request&pr_sort=total_amount&pr_order=<?= $prSort === 'total_amount' && $prOrder === 'ASC' ? 'DESC' : 'ASC' ?>&<?= http_build_query(array_filter(['year' => $selectedYear > 0 ? $selectedYear : null, 'month' => $selectedMonth > 0 ? $selectedMonth : null, 'search' => $search, 'status' => $statusFilter])) ?>" class="hover:text-blue-600 inline-flex items-center gap-1 font-semibold">
+                                            Total Amount
+                                            <?php if ($prSort === 'total_amount'): ?>
+                                                <i class="fas fa-sort-<?= $prOrder === 'ASC' ? 'up' : 'down' ?> text-blue-600 ml-1"></i>
+                                            <?php else: ?>
+                                                <i class="fas fa-sort text-gray-400 ml-1"></i>
+                                            <?php endif; ?>
+                                        </a>
+                                    </th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200">
+                                        <a href="?tab=purchase-request&pr_sort=status_code&pr_order=<?= $prSort === 'status_code' && $prOrder === 'ASC' ? 'DESC' : 'ASC' ?>&<?= http_build_query(array_filter(['year' => $selectedYear > 0 ? $selectedYear : null, 'month' => $selectedMonth > 0 ? $selectedMonth : null, 'search' => $search, 'status' => $statusFilter])) ?>" class="hover:text-blue-600 inline-flex items-center gap-1 font-semibold">
+                                            Status
+                                            <?php if ($prSort === 'status_code'): ?>
+                                                <i class="fas fa-sort-<?= $prOrder === 'ASC' ? 'up' : 'down' ?> text-blue-600 ml-1"></i>
+                                            <?php else: ?>
+                                                <i class="fas fa-sort text-gray-400 ml-1"></i>
+                                            <?php endif; ?>
+                                        </a>
+                                    </th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200">Action</th>
                                 </tr>
                             </thead>
-                            <tbody class="bg-white divide-y divide-gray-200">
+                            <tbody class="bg-white divide-y divide-gray-100">
                                 <?php if (empty($items)): ?>
                                     <tr>
-                                        <td colspan="14" class="px-6 py-4 text-center text-gray-500">
+                                        <td colspan="8" class="px-6 py-4 text-center text-gray-500">
                                             Tidak ada data
                                         </td>
                                     </tr>
@@ -1219,45 +1432,54 @@ $title = 'Procurement';
                                     <?php 
                                     $row_number = $offset + 1;
                                     foreach ($items as $item): ?>
-                                    <tr class="hover:bg-gray-50 cursor-pointer selectable-row" data-id="<?= htmlspecialchars($item['idrequest']) ?>" data-nama="<?= htmlspecialchars($item['namarequestor']) ?>" data-ket="<?= htmlspecialchars($item['keterangan']) ?>" data-tgl="<?= htmlspecialchars($item['tgl_req']) ?>" data-butuh="<?= htmlspecialchars($item['tgl_butuh']) ?>" data-supervisor="<?= htmlspecialchars($item['idsupervisor']) ?>" data-idbarang="<?= htmlspecialchars($item['idbarang']) ?>" data-link="<?= htmlspecialchars($item['linkpembelian']) ?>" data-item="<?= htmlspecialchars($item['namaitem']) ?>" data-desc="<?= htmlspecialchars($item['deskripsi']) ?>" data-harga="<?= htmlspecialchars($item['harga']) ?>" data-qty="<?= htmlspecialchars($item['qty']) ?>" data-total="<?= htmlspecialchars($item['total']) ?>" data-project="<?= htmlspecialchars($item['kodeproject']) ?>" data-kodebarang="<?= htmlspecialchars($item['kodebarang']) ?>" data-satuan="<?= htmlspecialchars($item['satuan']) ?>">
+                                    <tr class="hover:bg-blue-50 transition-colors duration-150 cursor-pointer" onclick="window.location.href='detail-request.php?idrequest=<?= htmlspecialchars($item['idrequest']) ?>'">
                                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= $row_number++ ?></td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900"><strong><?= htmlspecialchars($item['idrequest'] ?? '-') ?></strong></td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= htmlspecialchars($item['tgl_req'] ?? '-') ?></td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= htmlspecialchars($item['namarequestor'] ?? '-') ?></td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= htmlspecialchars($item['keterangan'] ?? '-') ?></td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= htmlspecialchars($item['idbarang'] ?? '-') ?></td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 max-w-xs truncate" title="<?= htmlspecialchars($item['linkpembelian'] ?? '-') ?>"><?= htmlspecialchars($item['linkpembelian'] ?? '-') ?></td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 max-w-xs truncate" title="<?= htmlspecialchars($item['namaitem'] ?? '-') ?>"><?= htmlspecialchars($item['namaitem'] ?? '-') ?></td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 max-w-xs truncate" title="<?= htmlspecialchars($item['deskripsi'] ?? '-') ?>"><?= htmlspecialchars($item['deskripsi'] ?? '-') ?></td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= htmlspecialchars($item['harga'] ?? '-') ?></td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= htmlspecialchars($item['qty'] ?? '-') ?></td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= htmlspecialchars($item['total'] ?? '-') ?></td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= htmlspecialchars($item['kodeproject'] ?? '-') ?></td>
-                                        <td class="px-6 py-4 whitespace-nowrap">
-                                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium
-                                                <?php 
-                                                    switch($item['status_code']) {
-                                                        case 1: echo 'bg-yellow-100 text-yellow-800'; break;
-                                                        case 2: echo 'bg-blue-100 text-blue-800'; break;
-                                                        case 3: echo 'bg-green-100 text-green-800'; break;
-                                                        case 4: echo 'bg-orange-100 text-orange-800'; break;
-                                                        case 5: echo 'bg-red-100 text-red-800'; break;
-                                                        case 6: echo 'bg-green-200 text-green-900'; break;
-                                                        default: echo 'bg-gray-100 text-gray-800'; break;
-                                                    }
-                                                ?>">
-                                                <?= htmlspecialchars($item['status_name']) ?>
-                                            </span>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                                            <strong><?= htmlspecialchars($item['idrequest'] ?? '-') ?></strong>
                                         </td>
                                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                                            <a href="detail-request.php?idrequest=<?= urlencode($item['idrequest']) ?>" class="px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 text-xs inline-block mr-2">
-                                                Detail
+                                            <?= date('d/m/Y', strtotime($item['tgl_req'] ?? 'now')) ?>
+                                        </td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                            <?= htmlspecialchars($item['namarequestor'] ?? '-') ?>
+                                        </td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 text-center">
+                                            <span class="inline-flex items-center px-3 py-1.5 bg-blue-100 text-blue-800 rounded-lg text-xs font-semibold border border-blue-200">
+                                                <i class="fas fa-box mr-1.5"></i><?= $item['total_items'] ?? 0 ?> items
+                                            </span>
+                                        </td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900 font-semibold">
+                                            Rp <?= number_format($item['total_amount'] ?? 0, 0, ',', '.') ?>
+                                        </td>
+                                        <td class="px-6 py-4 whitespace-nowrap">
+                                            <span class="inline-flex items-center px-3 py-1.5 rounded-full text-xs font-semibold shadow-sm
+                                                <?php 
+                                                    switch($item['status_code']) {
+                                                        case 0: echo 'bg-gray-200 text-gray-800 border border-gray-300'; break;
+                                                        case 1: echo 'bg-yellow-200 text-yellow-900 border border-yellow-300'; break;
+                                                        case 2: echo 'bg-blue-200 text-blue-900 border border-blue-300'; break;
+                                                        case 3: echo 'bg-green-200 text-green-900 border border-green-300'; break;
+                                                        case 4: echo 'bg-orange-200 text-orange-900 border border-orange-300'; break;
+                                                        case 5: echo 'bg-red-200 text-red-900 border border-red-300'; break;
+                                                        case 6: echo 'bg-emerald-200 text-emerald-900 border border-emerald-300'; break;
+                                                        default: echo 'bg-gray-200 text-gray-800 border border-gray-300'; break;
+                                                    }
+                                                ?>">
+                                                <?= htmlspecialchars($item['status_name'] ?? 'Pending') ?>
+                                            </span>
+                                            <?php if (($item['status_code'] ?? 0) == 5 && !empty($item['note_reject'])): ?>
+                                                <div class="mt-1 text-xs text-red-600 max-w-xs truncate" title="Alasan Reject: <?= htmlspecialchars($item['note_reject']) ?>">
+                                                    <i class="fas fa-info-circle"></i> <?= htmlspecialchars(substr($item['note_reject'], 0, 30)) ?>...
+                                                </div>
+                                            <?php endif; ?>
+                                        </td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                                            <a href="detail-request.php?idrequest=<?= htmlspecialchars($item['idrequest']) ?>" 
+                                               class="inline-flex items-center px-3 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors duration-150 text-xs font-medium shadow-sm">
+                                                <i class="fas fa-eye mr-1.5"></i>Detail
                                             </a>
-                                            <?php if ($_SESSION['role'] === 'Admin' || $_SESSION['role'] === 'Procurement'): ?>
-                                            <button onclick="confirmDelete('<?= urlencode($item['idrequest']) ?>')" class="px-3 py-1 bg-red-600 text-white rounded hover:bg-red-700 text-xs inline-block">
-                                                Delete
-                                            </button>
-                                            <?php endif; ?>                                        </td>                                    </tr>
+                                        </td>
+                                    </tr>
                                     <?php endforeach; ?>
                                 <?php endif; ?>
                             </tbody>
@@ -1269,11 +1491,11 @@ $title = 'Procurement';
                     <div class="flex items-center justify-between border-t border-gray-200 bg-white px-4 py-3 sm:px-6">
                         <div class="flex flex-1 justify-between sm:hidden">
                             <?php if ($page > 1): ?>
-                            <a href="?tab=<?= $activeTab ?>&page=<?= $page - 1 ?><?php if ($selectedYear > 0) echo '&year=' . $selectedYear; ?><?php if ($selectedMonth > 0) echo '&month=' . $selectedMonth; ?><?php if ($search) echo '&search=' . urlencode($search); ?>" class="relative inline-flex items-center rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">Previous</a>
+                            <a href="?tab=<?= $activeTab ?>&page=<?= $page - 1 ?>&pr_sort=<?= $prSort ?>&pr_order=<?= $prOrder ?><?php if ($selectedYear > 0) echo '&year=' . $selectedYear; ?><?php if ($selectedMonth > 0) echo '&month=' . $selectedMonth; ?><?php if ($search) echo '&search=' . urlencode($search); ?><?php if ($statusFilter !== '') echo '&status=' . $statusFilter; ?>" class="relative inline-flex items-center rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">Previous</a>
                             <?php endif; ?>
                             
                             <?php if ($page < $total_pages): ?>
-                            <a href="?tab=<?= $activeTab ?>&page=<?= $page + 1 ?><?php if ($selectedYear > 0) echo '&year=' . $selectedYear; ?><?php if ($selectedMonth > 0) echo '&month=' . $selectedMonth; ?><?php if ($search) echo '&search=' . urlencode($search); ?>" class="relative ml-3 inline-flex items-center rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">Next</a>
+                            <a href="?tab=<?= $activeTab ?>&page=<?= $page + 1 ?>&pr_sort=<?= $prSort ?>&pr_order=<?= $prOrder ?><?php if ($selectedYear > 0) echo '&year=' . $selectedYear; ?><?php if ($selectedMonth > 0) echo '&month=' . $selectedMonth; ?><?php if ($search) echo '&search=' . urlencode($search); ?><?php if ($statusFilter !== '') echo '&status=' . $statusFilter; ?>" class="relative ml-3 inline-flex items-center rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">Next</a>
                             <?php endif; ?>
                         </div>
                         <div class="hidden sm:flex sm:flex-1 sm:items-center sm:justify-between">
@@ -1285,7 +1507,7 @@ $title = 'Procurement';
                             <div>
                                 <nav class="isolate inline-flex -space-x-px rounded-md shadow-sm" aria-label="Pagination">
                                     <?php if ($page > 1): ?>
-                                    <a href="?tab=<?= $activeTab ?>&page=<?= $page - 1 ?><?php if ($selectedYear > 0) echo '&year=' . $selectedYear; ?><?php if ($selectedMonth > 0) echo '&month=' . $selectedMonth; ?><?php if ($search) echo '&search=' . urlencode($search); ?>" class="relative inline-flex items-center rounded-l-md px-2 py-2 text-gray-400 ring-1 ring-inset ring-gray-300 hover:bg-gray-50 focus:z-20 focus:outline-offset-0">
+                                    <a href="?tab=<?= $activeTab ?>&page=<?= $page - 1 ?>&pr_sort=<?= $prSort ?>&pr_order=<?= $prOrder ?><?php if ($selectedYear > 0) echo '&year=' . $selectedYear; ?><?php if ($selectedMonth > 0) echo '&month=' . $selectedMonth; ?><?php if ($search) echo '&search=' . urlencode($search); ?><?php if ($statusFilter !== '') echo '&status=' . $statusFilter; ?>" class="relative inline-flex items-center rounded-l-md px-2 py-2 text-gray-400 ring-1 ring-inset ring-gray-300 hover:bg-gray-50 focus:z-20 focus:outline-offset-0">
                                         <span class="sr-only">Previous</span>
                                         <svg class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
                                             <path fill-rule="evenodd" d="M12.79 5.23a.75.75 0 01-.02 1.06L8.832 10l3.938 3.71a.75.75 0 11-1.04 1.08l-4.5-4.25a.75.75 0 010-1.08l4.5-4.25a.75.75 0 011.06.02z" clip-rule="evenodd" />
@@ -1294,13 +1516,13 @@ $title = 'Procurement';
                                     <?php endif; ?>
                                     
                                     <?php for ($i = max(1, $page - 2); $i <= min($total_pages, $page + 2); $i++): ?>
-                                    <a href="?tab=<?= $activeTab ?>&page=<?= $i ?><?php if ($selectedYear > 0) echo '&year=' . $selectedYear; ?><?php if ($selectedMonth > 0) echo '&month=' . $selectedMonth; ?><?php if ($search) echo '&search=' . urlencode($search); ?>" class="<?php echo $i == $page ? 'relative z-10 inline-flex items-center bg-indigo-600 px-4 py-2 text-sm font-semibold text-white focus:z-20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600' : 'relative inline-flex items-center px-4 py-2 text-sm font-semibold text-gray-900 ring-1 ring-inset ring-gray-300 hover:bg-gray-50 focus:z-20 focus:outline-offset-0'; ?>">
+                                    <a href="?tab=<?= $activeTab ?>&page=<?= $i ?>&pr_sort=<?= $prSort ?>&pr_order=<?= $prOrder ?><?php if ($selectedYear > 0) echo '&year=' . $selectedYear; ?><?php if ($selectedMonth > 0) echo '&month=' . $selectedMonth; ?><?php if ($search) echo '&search=' . urlencode($search); ?><?php if ($statusFilter !== '') echo '&status=' . $statusFilter; ?>" class="<?php echo $i == $page ? 'relative z-10 inline-flex items-center bg-indigo-600 px-4 py-2 text-sm font-semibold text-white focus:z-20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600' : 'relative inline-flex items-center px-4 py-2 text-sm font-semibold text-gray-900 ring-1 ring-inset ring-gray-300 hover:bg-gray-50 focus:z-20 focus:outline-offset-0'; ?>">
                                         <?= $i ?>
                                     </a>
                                     <?php endfor; ?>
                                     
                                     <?php if ($page < $total_pages): ?>
-                                    <a href="?tab=<?= $activeTab ?>&page=<?= $page + 1 ?><?php if ($selectedYear > 0) echo '&year=' . $selectedYear; ?><?php if ($selectedMonth > 0) echo '&month=' . $selectedMonth; ?><?php if ($search) echo '&search=' . urlencode($search); ?>" class="relative inline-flex items-center rounded-r-md px-2 py-2 text-gray-400 ring-1 ring-inset ring-gray-300 hover:bg-gray-50 focus:z-20 focus:outline-offset-0">
+                                    <a href="?tab=<?= $activeTab ?>&page=<?= $page + 1 ?>&pr_sort=<?= $prSort ?>&pr_order=<?= $prOrder ?><?php if ($selectedYear > 0) echo '&year=' . $selectedYear; ?><?php if ($selectedMonth > 0) echo '&month=' . $selectedMonth; ?><?php if ($search) echo '&search=' . urlencode($search); ?><?php if ($statusFilter !== '') echo '&status=' . $statusFilter; ?>" class="relative inline-flex items-center rounded-r-md px-2 py-2 text-gray-400 ring-1 ring-inset ring-gray-300 hover:bg-gray-50 focus:z-20 focus:outline-offset-0">
                                         <span class="sr-only">Next</span>
                                         <svg class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
                                             <path fill-rule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clip-rule="evenodd" />
@@ -1318,9 +1540,22 @@ $title = 'Procurement';
                 <!-- PURCHASE ORDER TAB -->
                 <?php if ($activeTab == 'purchase-order'): ?>
                 <div>
-                    <!-- Toolbar -->
-                    <div class="flex justify-between items-center mb-6">
-                        <div class="flex gap-2">
+                    <!-- Toolbar with Entries, Search, and Filter -->
+                    <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 gap-4">
+                        <div class="flex flex-wrap items-center gap-4">
+                            <!-- Entries Dropdown -->
+                            <div class="flex items-center gap-2">
+                                <label class="text-sm text-gray-700 font-medium">Show</label>
+                                <select id="entries-po" onchange="changeEntries('po')" class="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+                                    <option value="10" <?= $limit == 10 ? 'selected' : '' ?>>10</option>
+                                    <option value="25" <?= $limit == 25 ? 'selected' : '' ?>>25</option>
+                                    <option value="50" <?= $limit == 50 ? 'selected' : '' ?>>50</option>
+                                    <option value="100" <?= $limit == 100 ? 'selected' : '' ?>>100</option>
+                                </select>
+                                <span class="text-sm text-gray-700">entries</span>
+                            </div>
+                            
+                            <!-- Action Buttons -->
                             <?php if ($_SESSION['role'] === 'Admin' || $_SESSION['role'] === 'Procurement'): ?>
                             <button onclick="showAddPOForm()" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center gap-2">
                                 <i class="fas fa-plus"></i>
@@ -1331,54 +1566,77 @@ $title = 'Procurement';
                                 Edit
                             </button>
                             <?php endif; ?>
-                        </div>                        
-                        <div class="flex gap-4 items-center">
+                        </div>
+                        
+                        <div class="flex flex-wrap items-center gap-4">
+                            <!-- Search Input -->
                             <div class="relative">
-                                <input type="text" id="search-<?= $activeTab ?>" placeholder="Search..." class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-64" onkeyup="handleSearch(event)">
-                                <button onclick="performSearch()" class="absolute right-3 top-2.5 text-gray-400 hover:text-gray-600">
-                                    <i class="fas fa-search"></i>
+                                <input type="text" id="search-po" placeholder="Search..." onkeyup="searchTable('po')" class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-64">
+                                <button onclick="clearSearch('po')" class="absolute right-3 top-2.5 text-gray-400 hover:text-gray-600">
+                                    <i class="fas fa-times"></i>
                                 </button>
                             </div>
                             
-                            <div>
-                                <select onchange="filterData()" id="filter-month-<?= $activeTab ?>" class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-32">
-                                    <option value="0" <?= $selectedMonth == 0 ? 'selected' : '' ?>>All Months</option>
-                                    <?php for($m = 1; $m <= 12; $m++): ?>
-                                    <option value="<?= $m ?>" <?= $selectedMonth == $m ? 'selected' : '' ?>><?= date('F', mktime(0, 0, 0, $m, 1)) ?></option>
-                                    <?php endfor; ?>
-                                </select>
-                            </div>
-                            
-                            <div>
-                                <select onchange="filterData()" id="filter-year-<?= $activeTab ?>" class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-32">
-                                    <option value="0" <?= $selectedYear == 0 ? 'selected' : '' ?>>All Years</option>
-                                    <?php for($y = date('Y'); $y >= 2020; $y--): ?>
-                                    <option value="<?= $y ?>" <?= $selectedYear == $y ? 'selected' : '' ?>><?= $y ?></option>
-                                    <?php endfor; ?>
-                                </select>
-                            </div>
-                            
-                            <button onclick="downloadReport()" class="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 flex items-center gap-2">
-                                <i class="fas fa-download"></i>
-                                Download
-                            </button>
+                            <!-- Status Filter -->
+                            <select id="status-filter-po" onchange="filterTableByStatus('po')" class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+                                <option value="">All Status</option>
+                                <option value="Pending">Pending</option>
+                                <option value="Process Order">Process Order</option>
+                                <option value="Arrived">Arrived</option>
+                            </select>
                         </div>
                     </div>                    <!-- Table -->
-                    <div class="overflow-x-auto">
+                    <div class="overflow-x-auto rounded-lg border border-gray-200 shadow-sm table-container">
                         <table id="purchase-order-table" class="min-w-full divide-y divide-gray-200">
-                            <thead class="bg-gray-50">
+                            <thead class="bg-gradient-to-r from-blue-50 to-indigo-50">
                                 <tr>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" width="50">#</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID Purchase Order</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Tanggal PO</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Supplier</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID Request</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Keterangan</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Action</th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200 cursor-pointer hover:bg-blue-100 transition" onclick="sortTable('pr', 0)" width="50">#</th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200">
+                                        <a href="?tab=purchase-order&po_sort=idpurchaseorder&po_order=<?= $poSort === 'idpurchaseorder' && $poOrder === 'ASC' ? 'DESC' : 'ASC' ?>&<?= http_build_query(array_filter(['year' => $selectedYear > 0 ? $selectedYear : null, 'month' => $selectedMonth > 0 ? $selectedMonth : null, 'search' => $search, 'po_status' => $poStatusFilter])) ?>" class="hover:text-blue-600 inline-flex items-center gap-1 font-semibold">
+                                            ID Purchase Order
+                                            <?php if ($poSort === 'idpurchaseorder'): ?>
+                                                <i class="fas fa-sort-<?= $poOrder === 'ASC' ? 'up' : 'down' ?> text-blue-600 ml-1"></i>
+                                            <?php else: ?>
+                                                <i class="fas fa-sort text-gray-400 ml-1"></i>
+                                            <?php endif; ?>
+                                        </a>
+                                    </th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200">
+                                        <a href="?tab=purchase-order&po_sort=tgl_po&po_order=<?= $poSort === 'tgl_po' && $poOrder === 'ASC' ? 'DESC' : 'ASC' ?>&<?= http_build_query(array_filter(['year' => $selectedYear > 0 ? $selectedYear : null, 'month' => $selectedMonth > 0 ? $selectedMonth : null, 'search' => $search, 'po_status' => $poStatusFilter])) ?>" class="hover:text-blue-600 inline-flex items-center gap-1 font-semibold">
+                                            Tanggal PO
+                                            <?php if ($poSort === 'tgl_po'): ?>
+                                                <i class="fas fa-sort-<?= $poOrder === 'ASC' ? 'up' : 'down' ?> text-blue-600 ml-1"></i>
+                                            <?php else: ?>
+                                                <i class="fas fa-sort text-gray-400 ml-1"></i>
+                                            <?php endif; ?>
+                                        </a>
+                                    </th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200">
+                                        <a href="?tab=purchase-order&po_sort=supplier&po_order=<?= $poSort === 'supplier' && $poOrder === 'ASC' ? 'DESC' : 'ASC' ?>&<?= http_build_query(array_filter(['year' => $selectedYear > 0 ? $selectedYear : null, 'month' => $selectedMonth > 0 ? $selectedMonth : null, 'search' => $search, 'po_status' => $poStatusFilter])) ?>" class="hover:text-blue-600 inline-flex items-center gap-1 font-semibold">
+                                            Supplier
+                                            <?php if ($poSort === 'supplier'): ?>
+                                                <i class="fas fa-sort-<?= $poOrder === 'ASC' ? 'up' : 'down' ?> text-blue-600 ml-1"></i>
+                                            <?php else: ?>
+                                                <i class="fas fa-sort text-gray-400 ml-1"></i>
+                                            <?php endif; ?>
+                                        </a>
+                                    </th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200">ID Request</th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200">Keterangan</th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200">
+                                        <a href="?tab=purchase-order&po_sort=status&po_order=<?= $poSort === 'status' && $poOrder === 'ASC' ? 'DESC' : 'ASC' ?>&<?= http_build_query(array_filter(['year' => $selectedYear > 0 ? $selectedYear : null, 'month' => $selectedMonth > 0 ? $selectedMonth : null, 'search' => $search, 'po_status' => $poStatusFilter])) ?>" class="hover:text-blue-600 inline-flex items-center gap-1 font-semibold">
+                                            Status
+                                            <?php if ($poSort === 'status'): ?>
+                                                <i class="fas fa-sort-<?= $poOrder === 'ASC' ? 'up' : 'down' ?> text-blue-600 ml-1"></i>
+                                            <?php else: ?>
+                                                <i class="fas fa-sort text-gray-400 ml-1"></i>
+                                            <?php endif; ?>
+                                        </a>
+                                    </th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200">Action</th>
                                 </tr>
                             </thead>
-                            <tbody class="bg-white divide-y divide-gray-200">
+                            <tbody class="bg-white divide-y divide-gray-100">
                                 <?php if (empty($items)): ?>
                                     <tr>
                                         <td colspan="8" class="px-6 py-4 text-center text-gray-500">
@@ -1389,7 +1647,7 @@ $title = 'Procurement';
                                     <?php 
                                     $row_number = $offset + 1;
                                     foreach ($items as $item): ?>
-                                    <tr class="hover:bg-gray-50 selectable-row" data-id="<?= htmlspecialchars($item['idpurchaseorder']) ?>">
+                                    <tr class="hover:bg-blue-50 transition-colors duration-150 selectable-row" data-id="<?= htmlspecialchars($item['idpurchaseorder']) ?>">
                                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= $row_number++ ?></td>
                                         <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900"><strong><?= htmlspecialchars($item['idpurchaseorder'] ?? '-') ?></strong></td>
                                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= htmlspecialchars($item['tgl_po'] ?? '-') ?></td>
@@ -1397,16 +1655,16 @@ $title = 'Procurement';
                                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= htmlspecialchars($item['idrequest'] ?? '-') ?></td>
                                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= htmlspecialchars($item['keterangan'] ?? '-') ?></td>
                                         <td class="px-6 py-4 whitespace-nowrap">
-                                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium
+                                            <span class="inline-flex items-center px-3 py-1.5 rounded-full text-xs font-semibold shadow-sm
                                                 <?php 
                                                     // Determine status color based on status name
-                                                    $statusClass = 'bg-gray-100 text-gray-800'; // Default
+                                                    $statusClass = 'bg-gray-200 text-gray-800 border border-gray-300'; // Default
                                                     if ($item['status_name'] == 'Process Order') {
-                                                        $statusClass = 'bg-blue-100 text-blue-800';
+                                                        $statusClass = 'bg-blue-200 text-blue-900 border border-blue-300';
                                                     } elseif ($item['status_name'] == 'Arrived') {
-                                                        $statusClass = 'bg-green-100 text-green-800';
+                                                        $statusClass = 'bg-green-200 text-green-900 border border-green-300';
                                                     } elseif ($item['status_name'] == 'Pending') {
-                                                        $statusClass = 'bg-yellow-100 text-yellow-800';
+                                                        $statusClass = 'bg-yellow-200 text-yellow-900 border border-yellow-300';
                                                     }
                                                     echo $statusClass;
                                                 ?>">
@@ -1414,12 +1672,12 @@ $title = 'Procurement';
                                             </span>
                                         </td>
                                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                                            <a href="detail-order.php?id=<?= urlencode($item['idpurchaseorder']) ?>" class="px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 text-xs inline-block mr-2">
-                                                Detail
+                                            <a href="detail-order.php?id=<?= urlencode($item['idpurchaseorder']) ?>" class="inline-flex items-center px-3 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors duration-150 text-xs font-medium shadow-sm mr-2">
+                                                <i class="fas fa-eye mr-1.5"></i>Detail
                                             </a>
                                             <?php if ($_SESSION['role'] === 'Admin' || $_SESSION['role'] === 'Procurement'): ?>
-                                            <button onclick="confirmDeletePO('<?= urlencode($item['idpurchaseorder']) ?>')" class="px-3 py-1 bg-red-600 text-white rounded hover:bg-red-700 text-xs inline-block">
-                                                Delete
+                                            <button onclick="confirmDeletePO('<?= urlencode($item['idpurchaseorder']) ?>')" class="inline-flex items-center px-3 py-1.5 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors duration-150 text-xs font-medium shadow-sm">
+                                                <i class="fas fa-trash mr-1.5"></i>Delete
                                             </button>
                                             <?php endif; ?>                                        </td>
                                     </tr>
@@ -1433,11 +1691,11 @@ $title = 'Procurement';
                     <div class="flex items-center justify-between border-t border-gray-200 bg-white px-4 py-3 sm:px-6">
                         <div class="flex flex-1 justify-between sm:hidden">
                             <?php if ($page > 1): ?>
-                            <a href="?tab=<?= $activeTab ?>&page=<?= $page - 1 ?><?php if ($selectedYear > 0) echo '&year=' . $selectedYear; ?><?php if ($selectedMonth > 0) echo '&month=' . $selectedMonth; ?><?php if ($search) echo '&search=' . urlencode($search); ?>" class="relative inline-flex items-center rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">Previous</a>
+                            <a href="?tab=<?= $activeTab ?>&page=<?= $page - 1 ?>&po_sort=<?= $poSort ?>&po_order=<?= $poOrder ?><?php if ($selectedYear > 0) echo '&year=' . $selectedYear; ?><?php if ($selectedMonth > 0) echo '&month=' . $selectedMonth; ?><?php if ($search) echo '&search=' . urlencode($search); ?><?php if ($poStatusFilter !== '') echo '&po_status=' . urlencode($poStatusFilter); ?>" class="relative inline-flex items-center rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">Previous</a>
                             <?php endif; ?>
                             
                             <?php if ($page < $total_pages): ?>
-                            <a href="?tab=<?= $activeTab ?>&page=<?= $page + 1 ?><?php if ($selectedYear > 0) echo '&year=' . $selectedYear; ?><?php if ($selectedMonth > 0) echo '&month=' . $selectedMonth; ?><?php if ($search) echo '&search=' . urlencode($search); ?>" class="relative ml-3 inline-flex items-center rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">Next</a>
+                            <a href="?tab=<?= $activeTab ?>&page=<?= $page + 1 ?>&po_sort=<?= $poSort ?>&po_order=<?= $poOrder ?><?php if ($selectedYear > 0) echo '&year=' . $selectedYear; ?><?php if ($selectedMonth > 0) echo '&month=' . $selectedMonth; ?><?php if ($search) echo '&search=' . urlencode($search); ?><?php if ($poStatusFilter !== '') echo '&po_status=' . urlencode($poStatusFilter); ?>" class="relative ml-3 inline-flex items-center rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">Next</a>
                             <?php endif; ?>
                         </div>
                         <div class="hidden sm:flex sm:flex-1 sm:items-center sm:justify-between">
@@ -1449,7 +1707,7 @@ $title = 'Procurement';
                             <div>
                                 <nav class="isolate inline-flex -space-x-px rounded-md shadow-sm" aria-label="Pagination">
                                     <?php if ($page > 1): ?>
-                                    <a href="?tab=<?= $activeTab ?>&page=<?= $page - 1 ?><?php if ($selectedYear > 0) echo '&year=' . $selectedYear; ?><?php if ($selectedMonth > 0) echo '&month=' . $selectedMonth; ?><?php if ($search) echo '&search=' . urlencode($search); ?>" class="relative inline-flex items-center rounded-l-md px-2 py-2 text-gray-400 ring-1 ring-inset ring-gray-300 hover:bg-gray-50 focus:z-20 focus:outline-offset-0">
+                                    <a href="?tab=<?= $activeTab ?>&page=<?= $page - 1 ?>&po_sort=<?= $poSort ?>&po_order=<?= $poOrder ?><?php if ($selectedYear > 0) echo '&year=' . $selectedYear; ?><?php if ($selectedMonth > 0) echo '&month=' . $selectedMonth; ?><?php if ($search) echo '&search=' . urlencode($search); ?><?php if ($poStatusFilter !== '') echo '&po_status=' . urlencode($poStatusFilter); ?>" class="relative inline-flex items-center rounded-l-md px-2 py-2 text-gray-400 ring-1 ring-inset ring-gray-300 hover:bg-gray-50 focus:z-20 focus:outline-offset-0">
                                         <span class="sr-only">Previous</span>
                                         <svg class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
                                             <path fill-rule="evenodd" d="M12.79 5.23a.75.75 0 01-.02 1.06L8.832 10l3.938 3.71a.75.75 0 11-1.04 1.08l-4.5-4.25a.75.75 0 010-1.08l4.5-4.25a.75.75 0 011.06.02z" clip-rule="evenodd" />
@@ -1458,13 +1716,13 @@ $title = 'Procurement';
                                     <?php endif; ?>
                                     
                                     <?php for ($i = max(1, $page - 2); $i <= min($total_pages, $page + 2); $i++): ?>
-                                    <a href="?tab=<?= $activeTab ?>&page=<?= $i ?><?php if ($selectedYear > 0) echo '&year=' . $selectedYear; ?><?php if ($selectedMonth > 0) echo '&month=' . $selectedMonth; ?><?php if ($search) echo '&search=' . urlencode($search); ?>" class="<?php echo $i == $page ? 'relative z-10 inline-flex items-center bg-indigo-600 px-4 py-2 text-sm font-semibold text-white focus:z-20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600' : 'relative inline-flex items-center px-4 py-2 text-sm font-semibold text-gray-900 ring-1 ring-inset ring-gray-300 hover:bg-gray-50 focus:z-20 focus:outline-offset-0'; ?>">
+                                    <a href="?tab=<?= $activeTab ?>&page=<?= $i ?>&po_sort=<?= $poSort ?>&po_order=<?= $poOrder ?><?php if ($selectedYear > 0) echo '&year=' . $selectedYear; ?><?php if ($selectedMonth > 0) echo '&month=' . $selectedMonth; ?><?php if ($search) echo '&search=' . urlencode($search); ?><?php if ($poStatusFilter !== '') echo '&po_status=' . urlencode($poStatusFilter); ?>" class="<?php echo $i == $page ? 'relative z-10 inline-flex items-center bg-indigo-600 px-4 py-2 text-sm font-semibold text-white focus:z-20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600' : 'relative inline-flex items-center px-4 py-2 text-sm font-semibold text-gray-900 ring-1 ring-inset ring-gray-300 hover:bg-gray-50 focus:z-20 focus:outline-offset-0'; ?>">
                                         <?= $i ?>
                                     </a>
                                     <?php endfor; ?>
                                     
                                     <?php if ($page < $total_pages): ?>
-                                    <a href="?tab=<?= $activeTab ?>&page=<?= $page + 1 ?><?php if ($selectedYear > 0) echo '&year=' . $selectedYear; ?><?php if ($selectedMonth > 0) echo '&month=' . $selectedMonth; ?><?php if ($search) echo '&search=' . urlencode($search); ?>" class="relative inline-flex items-center rounded-r-md px-2 py-2 text-gray-400 ring-1 ring-inset ring-gray-300 hover:bg-gray-50 focus:z-20 focus:outline-offset-0">
+                                    <a href="?tab=<?= $activeTab ?>&page=<?= $page + 1 ?>&po_sort=<?= $poSort ?>&po_order=<?= $poOrder ?><?php if ($selectedYear > 0) echo '&year=' . $selectedYear; ?><?php if ($selectedMonth > 0) echo '&month=' . $selectedMonth; ?><?php if ($search) echo '&search=' . urlencode($search); ?><?php if ($poStatusFilter !== '') echo '&po_status=' . urlencode($poStatusFilter); ?>" class="relative inline-flex items-center rounded-r-md px-2 py-2 text-gray-400 ring-1 ring-inset ring-gray-300 hover:bg-gray-50 focus:z-20 focus:outline-offset-0">
                                         <span class="sr-only">Next</span>
                                         <svg class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
                                             <path fill-rule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clip-rule="evenodd" />
@@ -1595,7 +1853,29 @@ function filterData() {
         url += `&year=${encodeURIComponent(year)}`;
     }
     
-    // Navigate to the new URL
+    // Redirect to new URL
+    window.location.href = url;
+}
+
+// Change entries per page
+function changePerPage(value) {
+    const urlParams = new URLSearchParams(window.location.search);
+    const currentTab = urlParams.get('tab') || 'purchase-request';
+    
+    // Build URL with per_page parameter
+    let url = `?tab=${currentTab}&per_page=${value}&page=1`;
+    
+    // Preserve other filters
+    if (urlParams.get('year')) url += `&year=${urlParams.get('year')}`;
+    if (urlParams.get('month')) url += `&month=${urlParams.get('month')}`;
+    if (urlParams.get('search')) url += `&search=${urlParams.get('search')}`;
+    if (urlParams.get('status')) url += `&status=${urlParams.get('status')}`;
+    if (urlParams.get('po_status')) url += `&po_status=${urlParams.get('po_status')}`;
+    if (urlParams.get('pr_sort')) url += `&pr_sort=${urlParams.get('pr_sort')}`;
+    if (urlParams.get('pr_order')) url += `&pr_order=${urlParams.get('pr_order')}`;
+    if (urlParams.get('po_sort')) url += `&po_sort=${urlParams.get('po_sort')}`;
+    if (urlParams.get('po_order')) url += `&po_order=${urlParams.get('po_order')}`;
+    
     window.location.href = url;
 }
 
@@ -2055,24 +2335,38 @@ document.addEventListener("DOMContentLoaded", function() {
     });
 });
 
-// Show add form function
-function showAddForm() {
-    alert('Add functionality would be implemented here');
-}
-
-// Show edit form function
-function showEditForm() {
-    alert('Edit functionality would be implemented here');
-}
-
 // Show add PO form function
 function showAddPOForm() {
-    alert('Add PO functionality would be implemented here');
+    // Check user role - Admin, Procurement, Leader, and Manager can add PO
+    var userRole = '<?php echo $_SESSION['role'] ?? ''; ?>';
+    if (userRole !== 'Admin' && userRole !== 'Procurement' && userRole !== 'Leader' && userRole !== 'Manager') {
+        alert('You do not have permission to add purchase orders.');
+        return;
+    }
+    document.getElementById('addOrderModal').style.display = 'block';
 }
 
 // Show edit PO form function
 function showEditPOForm() {
-    alert('Edit PO functionality would be implemented here');
+    // Check user role - Admin, Procurement, Leader, and Manager can edit PO
+    var userRole = '<?php echo $_SESSION['role'] ?? ''; ?>';
+    if (userRole !== 'Admin' && userRole !== 'Procurement' && userRole !== 'Leader' && userRole !== 'Manager') {
+        alert('You do not have permission to edit purchase orders.');
+        return;
+    }
+    
+    // Check if a row is selected
+    const selectedRow = document.querySelector('.selected-row');
+    if (!selectedRow) {
+        alert('Please select a row to edit first');
+        return;
+    }
+    
+    // Get data from the selected row
+    const idPurchaseOrder = selectedRow.getAttribute('data-id');
+    
+    // Load purchase order data for editing
+    loadPurchaseOrderForEdit(idPurchaseOrder);
 }
 
 // Handle search on Enter key
@@ -2179,9 +2473,9 @@ function showEditForm() {
 
 // Show add PO form function
 function showAddPOForm() {
-    // Check user role - only Admin and Procurement can add PO
+    // Check user role - Admin, Procurement, Leader, and Manager can add PO
     var userRole = '<?php echo $_SESSION['role'] ?? ''; ?>';
-    if (userRole !== 'Admin' && userRole !== 'Procurement') {
+    if (userRole !== 'Admin' && userRole !== 'Procurement' && userRole !== 'Leader' && userRole !== 'Manager') {
         alert('You do not have permission to add purchase orders.');
         return;
     }
@@ -2190,9 +2484,9 @@ function showAddPOForm() {
 
 // Show edit PO form function
 function showEditPOForm() {
-    // Check user role - only Admin and Procurement can edit PO
+    // Check user role - Admin, Procurement, Leader, and Manager can edit PO
     var userRole = '<?php echo $_SESSION['role'] ?? ''; ?>';
-    if (userRole !== 'Admin' && userRole !== 'Procurement') {
+    if (userRole !== 'Admin' && userRole !== 'Procurement' && userRole !== 'Leader' && userRole !== 'Manager') {
         alert('You do not have permission to edit purchase orders.');
         return;
     }
@@ -2745,14 +3039,24 @@ function loadBarangData(idbarang) {
                                 id="idrequest" name="idrequest" onchange="loadRequestDetails(this.value)" required>
                             <option value="">Select Request</option>
                             <?php 
-                            // Fetch all purchase requests that have data
-                            $stmt = $pdo->prepare("SELECT idrequest, keterangan FROM purchaserequest WHERE idrequest IN (SELECT DISTINCT idrequest FROM detailrequest) ORDER BY tgl_req DESC");
+                            // Fetch only approved purchase requests (status = 3) that are not rejected
+                            $stmt = $pdo->prepare("
+                                SELECT pr.idrequest, pr.namarequestor, u.nama as nama_requestor
+                                FROM purchaserequest pr
+                                LEFT JOIN users u ON pr.namarequestor = u.iduser
+                                WHERE pr.status = 3 
+                                AND pr.idrequest IN (SELECT DISTINCT idrequest FROM detailrequest)
+                                AND pr.idrequest NOT IN (
+                                    SELECT idrequest FROM purchaserequest WHERE status = 5
+                                )
+                                ORDER BY pr.tgl_req DESC
+                            ");
                             $stmt->execute();
                             $requests = $stmt->fetchAll(PDO::FETCH_ASSOC);
                             foreach ($requests as $request): 
                             ?>
                             <option value="<?= htmlspecialchars($request['idrequest']) ?>">
-                                <?= htmlspecialchars($request['idrequest']) ?> - <?= htmlspecialchars($request['keterangan']) ?>
+                                <?= htmlspecialchars($request['idrequest']) ?> - <?= htmlspecialchars($request['nama_requestor'] ?: $request['namarequestor']) ?>
                             </option>
                             <?php endforeach; ?>
                         </select>
@@ -3266,6 +3570,214 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 });
+
+// No DataTables initialization - using custom PHP pagination instead
+// Tables use server-side pagination with custom controls
+
+// Client-side Table Features
+let tableData = {
+    pr: [],
+    po: []
+};
+
+let currentSort = {
+    pr: { column: -1, direction: 'asc' },
+    po: { column: -1, direction: 'asc' }
+};
+
+// Initialize table data on page load
+document.addEventListener('DOMContentLoaded', function() {
+    // Store original table data
+    storeTableData('pr');
+    storeTableData('po');
+});
+
+// Store table data for filtering
+function storeTableData(tableType) {
+    const table = document.getElementById(`${tableType === 'pr' ? 'purchase-request' : 'purchase-order'}-table`);
+    if (!table) return;
+    
+    const tbody = table.querySelector('tbody');
+    const rows = tbody.querySelectorAll('tr');
+    
+    tableData[tableType] = [];
+    rows.forEach(row => {
+        const cells = row.querySelectorAll('td');
+        const rowData = [];
+        cells.forEach(cell => {
+            rowData.push(cell.textContent.trim());
+        });
+        rowData.push(row); // Store reference to the row element
+        tableData[tableType].push(rowData);
+    });
+}
+
+// Search table function
+function searchTable(tableType) {
+    const searchTerm = document.getElementById(`search-${tableType}`).value.toLowerCase();
+    const statusFilter = document.getElementById(`status-filter-${tableType}`).value;
+    
+    filterAndDisplayTable(tableType, searchTerm, statusFilter);
+}
+
+// Clear search
+function clearSearch(tableType) {
+    document.getElementById(`search-${tableType}`).value = '';
+    const statusFilter = document.getElementById(`status-filter-${tableType}`).value;
+    filterAndDisplayTable(tableType, '', statusFilter);
+}
+
+// Filter table by status
+function filterTableByStatus(tableType) {
+    const searchTerm = document.getElementById(`search-${tableType}`).value.toLowerCase();
+    const statusFilter = document.getElementById(`status-filter-${tableType}`).value;
+    
+    filterAndDisplayTable(tableType, searchTerm, statusFilter);
+}
+
+// Combined filter and display
+function filterAndDisplayTable(tableType, searchTerm, statusFilter) {
+    const table = document.getElementById(`${tableType === 'pr' ? 'purchase-request' : 'purchase-order'}-table`);
+    if (!table) return;
+    
+    const tbody = table.querySelector('tbody');
+    const rows = tbody.querySelectorAll('tr');
+    
+    let visibleCount = 0;
+    
+    rows.forEach((row, index) => {
+        const cells = row.querySelectorAll('td');
+        let rowText = '';
+        cells.forEach(cell => {
+            rowText += cell.textContent.toLowerCase() + ' ';
+        });
+        
+        // Get status text (column 6 for PR, column 6 for PO)
+        const statusIndex = tableType === 'pr' ? 6 : 6;
+        const rowStatus = cells[statusIndex]?.textContent.trim() || '';
+        
+        // Check if row matches search
+        const matchesSearch = !searchTerm || rowText.includes(searchTerm);
+        
+        // Check if row matches status filter
+        const matchesStatus = !statusFilter || rowStatus.includes(statusFilter);
+        
+        // Show/hide row
+        if (matchesSearch && matchesStatus) {
+            row.style.display = '';
+            visibleCount++;
+        } else {
+            row.style.display = 'none';
+        }
+    });
+    
+    // Update info text
+    updateTableInfo(tableType, visibleCount);
+}
+
+// Update table info text
+function updateTableInfo(tableType, visibleCount) {
+    const table = document.getElementById(`${tableType === 'pr' ? 'purchase-request' : 'purchase-order'}-table`);
+    if (!table) return;
+    
+    const tbody = table.querySelector('tbody');
+    const totalRows = tbody.querySelectorAll('tr').length;
+    
+    // Create or update info text
+    let infoDiv = document.getElementById(`info-${tableType}`);
+    if (!infoDiv) {
+        infoDiv = document.createElement('div');
+        infoDiv.id = `info-${tableType}`;
+        infoDiv.className = 'text-sm text-gray-700 mt-2';
+        table.parentElement.appendChild(infoDiv);
+    }
+    
+    infoDiv.textContent = `Showing ${visibleCount} of ${totalRows} entries`;
+}
+
+// Change entries per page (client-side show/hide)
+// Change entries per page - reload with new limit
+function changeEntries(tableType) {
+    const entries = parseInt(document.getElementById(`entries-${tableType}`).value);
+    
+    // Get current URL parameters
+    const urlParams = new URLSearchParams(window.location.search);
+    
+    // Update limit parameter
+    urlParams.set('limit', entries);
+    urlParams.set('page', '1'); // Reset to first page
+    
+    // Reload page with new parameters
+    window.location.search = urlParams.toString();
+}
+
+// Sort table by column
+function sortTable(tableType, columnIndex) {
+    const table = document.getElementById(`${tableType === 'pr' ? 'purchase-request' : 'purchase-order'}-table`);
+    if (!table) return;
+    
+    const tbody = table.querySelector('tbody');
+    const rows = Array.from(tbody.querySelectorAll('tr'));
+    
+    // Toggle sort direction
+    if (currentSort[tableType].column === columnIndex) {
+        currentSort[tableType].direction = currentSort[tableType].direction === 'asc' ? 'desc' : 'asc';
+    } else {
+        currentSort[tableType].column = columnIndex;
+        currentSort[tableType].direction = 'asc';
+    }
+    
+    // Sort rows
+    rows.sort((a, b) => {
+        const aText = a.cells[columnIndex]?.textContent.trim() || '';
+        const bText = b.cells[columnIndex]?.textContent.trim() || '';
+        
+        // Try to parse as numbers
+        const aNum = parseFloat(aText.replace(/[^0-9.-]/g, ''));
+        const bNum = parseFloat(bText.replace(/[^0-9.-]/g, ''));
+        
+        let comparison = 0;
+        if (!isNaN(aNum) && !isNaN(bNum)) {
+            comparison = aNum - bNum;
+        } else {
+            comparison = aText.localeCompare(bText);
+        }
+        
+        return currentSort[tableType].direction === 'asc' ? comparison : -comparison;
+    });
+    
+    // Re-append sorted rows
+    rows.forEach(row => tbody.appendChild(row));
+    
+    // Update sort indicators
+    updateSortIndicators(tableType, columnIndex);
+}
+
+// Update sort indicators in table header
+function updateSortIndicators(tableType, columnIndex) {
+    const table = document.getElementById(`${tableType === 'pr' ? 'purchase-request' : 'purchase-order'}-table`);
+    if (!table) return;
+    
+    const headers = table.querySelectorAll('thead th');
+    headers.forEach((header, index) => {
+        // Remove existing arrows
+        const existingArrow = header.querySelector('.sort-arrow');
+        if (existingArrow) {
+            existingArrow.remove();
+        }
+        
+        // Add arrow to sorted column
+        if (index === columnIndex) {
+            const arrow = document.createElement('i');
+            arrow.className = `fas fa-sort-${currentSort[tableType].direction === 'asc' ? 'up' : 'down'} sort-arrow text-blue-600 ml-1`;
+            header.querySelector('a')?.appendChild(arrow) || header.appendChild(arrow);
+        } else {
+            const arrow = document.createElement('i');
+            arrow.className = 'fas fa-sort sort-arrow text-gray-400 ml-1';
+            header.querySelector('a')?.appendChild(arrow) || header.appendChild(arrow);
+        }
+    });
+}
 
 </script>
 

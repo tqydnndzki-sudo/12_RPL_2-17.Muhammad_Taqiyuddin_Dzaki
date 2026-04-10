@@ -346,27 +346,120 @@ $qUsers->execute();
 $users = $qUsers->fetchAll(PDO::FETCH_ASSOC);
 
 /* =========================
-   UPDATE STATUS
+   UPDATE STATUS WITH LEADER_TYPE VALIDATION
 ========================= */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
-
+    
+    // ==============================================
+    // VALIDASI: Wajib isi alasan jika REJECT
+    // ==============================================
+    if ($_POST['action'] === 'reject') {
+        $note_reject = trim($_POST['note_reject'] ?? '');
+        
+        if (empty($note_reject)) {
+            header("Location: detail-request.php?idrequest=$idrequest&error=reject_reason_required");
+            exit;
+        }
+    }
+    
+    // ==============================================
+    // VALIDASI: Cek user yang login adalah Leader yang ditugaskan
+    // ==============================================
+    $currentUserId = $_SESSION['user_id'] ?? null;
+    
+    if (!$currentUserId) {
+        header("Location: ../login.php?message=Please login first");
+        exit;
+    }
+    
+    // Get current user data
+    $stmt = $pdo->prepare("SELECT iduser, nama, roletype, leader_type FROM users WHERE iduser = ?");
+    $stmt->execute([$currentUserId]);
+    $currentUser = $stmt->fetch(PDO::FETCH_ASSOC);
+    
+    if (!$currentUser) {
+        die("Error: User tidak ditemukan di database!");
+    }
+    
+    // Hanya Leader dan Manager yang bisa approve/reject
+    if (!in_array($currentUser['roletype'], ['Leader', 'Manager'])) {
+        header("Location: detail-request.php?idrequest=$idrequest&error=only_leaders_can_approve");
+        exit;
+    }
+    
+    // Get PR data to check assigned leader
+    $stmtPR = $pdo->prepare("SELECT idrequest, idsupervisor, status FROM purchaserequest WHERE idrequest = ?");
+    $stmtPR->execute([$idrequest]);
+    $prData = $stmtPR->fetch(PDO::FETCH_ASSOC);
+    
+    if (!$prData) {
+        die("Error: Purchase Request tidak ditemukan!");
+    }
+    
+    $assignedLeaderId = $prData['idsupervisor'];
+    $currentStatus = $prData['status'];
+    
+    // ==============================================
+    // VALIDASI KETAT: Hanya Leader yang ditugaskan yang bisa approve
+    // ==============================================
+    if ($currentUser['roletype'] === 'Leader') {
+        // Cek apakah user ini adalah leader yang ditugaskan untuk PR ini
+        if ($currentUserId != $assignedLeaderId) {
+            // Cek apakah leader_type sama
+            $stmtAssigned = $pdo->prepare("SELECT leader_type FROM users WHERE iduser = ?");
+            $stmtAssigned->execute([$assignedLeaderId]);
+            $assignedLeader = $stmtAssigned->fetch(PDO::FETCH_ASSOC);
+            
+            if ($assignedLeader && $assignedLeader['leader_type'] !== $currentUser['leader_type']) {
+                header("Location: detail-request.php?idrequest=$idrequest&error=wrong_division_leader");
+                exit;
+            }
+        }
+        
+        // Validasi: Leader hanya bisa approve jika status = 1 (Process Approval Leader)
+        if ($currentStatus != 1) {
+            header("Location: detail-request.php?idrequest=$idrequest&error=invalid_status_for_leader");
+            exit;
+        }
+    }
+    
+    // Manager bisa approve jika status = 2 (Process Approval Manager)
+    if ($currentUser['roletype'] === 'Manager' && $currentStatus != 2) {
+        header("Location: detail-request.php?idrequest=$idrequest&error=invalid_status_for_manager");
+        exit;
+    }
+    
+    // ==============================================
+    // PROSES APPROVAL/REJECT/PENDING
+    // ==============================================
     $map = [
-        'approve' => 3,  // Approved
+        'approve' => ($currentUser['roletype'] === 'Leader') ? 2 : 3,  // Leader->2 (Manager), Manager->3 (Approved)
         'reject'  => 5,  // Reject
         'pending' => 1   // Process Approval Leader (default pending state)
     ];
 
     $status = $map[$_POST['action']] ?? 1;
-    $note   = $_POST['note_reject'] ?? null;
+    $note   = ($_POST['action'] === 'reject') ? trim($_POST['note_reject'] ?? '') : null;
 
-    $ins = $pdo->prepare("
-        INSERT INTO logstatusreq (status, date, note_reject, idrequest)
-        VALUES (?, NOW(), ?, ?)
-    ");
-    $ins->execute([$status, $note, $idrequest]);
+    try {
+        $ins = $pdo->prepare("
+            INSERT INTO logstatusreq (status, date, note_reject, idrequest)
+            VALUES (?, NOW(), ?, ?)
+        ");
+        $ins->execute([$status, $note, $idrequest]);
+        
+        // Update status di purchaserequest table
+        $updatePR = $pdo->prepare("UPDATE purchaserequest SET status = ? WHERE idrequest = ?");
+        $updatePR->execute([$status, $idrequest]);
 
-    header("Location: detail-request.php?idrequest=$idrequest&status_updated=1");
-    exit;
+        header("Location: detail-request.php?idrequest=$idrequest&status_updated=1");
+        exit;
+    } catch (Exception $e) {
+        // Log error dan redirect dengan pesan error
+        error_log("Error updating PR status: " . $e->getMessage());
+        header("Location: detail-request.php?idrequest=$idrequest&error=status_update_failed");
+        exit;
+    }
 }
 
 $title = 'Detail Purchase Request';
@@ -619,16 +712,18 @@ $title = 'Detail Purchase Request';
         <!-- ACTION -->
         <div class="mb-6 p-4 bg-white border border-gray-200 rounded-lg">
             <h3 class="text-lg font-semibold text-gray-900 mb-3">Status Actions</h3>
-            <form method="POST" class="flex flex-wrap gap-3">
+            <form method="POST" class="flex flex-wrap gap-3" id="actionForm">
                 <button name="action" value="approve" class="bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 flex items-center gap-2">
                     <i class="fas fa-check-circle"></i> Approve
                 </button>
                 <button name="action" value="pending" class="bg-yellow-500 text-white px-4 py-2 rounded-lg hover:bg-yellow-600 flex items-center gap-2">
                     <i class="fas fa-clock"></i> Pending
                 </button>
-                <button name="action" value="reject" class="bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700 flex items-center gap-2">
+                <button type="button" onclick="showRejectModal()" class="bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700 flex items-center gap-2">
                     <i class="fas fa-times-circle"></i> Reject
                 </button>
+                
+                <input type="hidden" name="note_reject" id="note_reject_input" value="">
             </form>
         </div>
 
@@ -679,6 +774,40 @@ $title = 'Detail Purchase Request';
         </div>
     </div>
 
+    <!-- Reject Reason Modal -->
+    <div id="rejectModal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeModal('rejectModal')">&times;</span>
+            <h2 class="text-xl font-bold mb-4 text-red-600">
+                <i class="fas fa-exclamation-triangle"></i> Reject Purchase Request
+            </h2>
+            <div class="bg-red-50 border-l-4 border-red-500 p-4 mb-4">
+                <p class="text-red-700">
+                    <strong>Perhatian:</strong> Anda harus memberikan alasan mengapa purchase request ini di-reject.
+                </p>
+            </div>
+            <form id="rejectForm">
+                <div class="mb-4">
+                    <label class="block text-gray-700 text-sm font-bold mb-2" for="reject_reason">
+                        Alasan Reject <span class="text-red-500">*</span>
+                    </label>
+                    <textarea class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline" 
+                              id="reject_reason" name="reject_reason" rows="4" required
+                              placeholder="Jelaskan alasan mengapa purchase request ini di-reject..."></textarea>
+                    <p class="text-sm text-gray-500 mt-1">Alasan ini akan dicatat dan dapat dilihat oleh requestor</p>
+                </div>
+                <div class="flex items-center justify-between">
+                    <button type="button" onclick="closeModal('rejectModal')" class="bg-gray-500 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline">
+                        Cancel
+                    </button>
+                    <button type="submit" class="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline">
+                        <i class="fas fa-times-circle"></i> Confirm Reject
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
     <script>
         // Auto-calculate total when price or quantity changes
         document.addEventListener('input', function(e) {
@@ -718,6 +847,50 @@ $title = 'Detail Purchase Request';
                 event.target.style.display = 'none';
             }
         }
+
+        // Show reject modal
+        function showRejectModal() {
+            document.getElementById('reject_reason').value = '';
+            document.getElementById('rejectModal').style.display = 'block';
+        }
+
+        // Handle reject form submission
+        document.getElementById('rejectForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            
+            const rejectReason = document.getElementById('reject_reason').value.trim();
+            
+            if (!rejectReason) {
+                alert('Alasan reject wajib diisi!');
+                return;
+            }
+            
+            // Set the reject reason
+            document.getElementById('note_reject_input').value = rejectReason;
+            
+            const form = document.getElementById('actionForm');
+            
+            // Remove any existing action input to prevent duplicates
+            const existingAction = form.querySelector('input[name="action"]');
+            if (existingAction) {
+                existingAction.remove();
+            }
+            
+            // Create hidden action input
+            const actionInput = document.createElement('input');
+            actionInput.type = 'hidden';
+            actionInput.name = 'action';
+            actionInput.value = 'reject';
+            
+            form.appendChild(actionInput);
+            
+            // Close modal
+            closeModal('rejectModal');
+            
+            // Submit the form
+            form.submit();
+        });
+
     </script>
 </body>
 </html>

@@ -11,30 +11,58 @@ $auth->checkAccess();
 
 // Handle POST requests for add/edit operations
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    if (isset($_POST['add_item'])) {
-        // Add new item
+    // HANDLE TAB INVENTORY - Update m_barang
+    if (isset($_POST['add_item_inventory'])) {
+        $idbarang = $_POST['idbarang'] ?? '';
         $kodebarang = $_POST['kodebarang'] ?? '';
         $nama_barang = $_POST['nama_barang'] ?? '';
-        $deskripsi = $_POST['deskripsi'] ?? '';
-        $harga = $_POST['harga'] ?? 0;
-        $satuan = $_POST['satuan'] ?? '';
-        $kodeproject = $_POST['kodeproject'] ?? '';
         $idkategori = $_POST['idkategori'] ?? null;
+        $lokasi = $_POST['lokasi'] ?? '';
+        $kodeproject = $_POST['kodeproject'] ?? '';
+        $harga = $_POST['harga'] ?? 0;
+        $stok_awal = $_POST['stok_awal'] ?? 0;
+        $stok_akhir = $_POST['stok_akhir'] ?? 0;
+        $keterangan = $_POST['keterangan'] ?? '';
         
-        // Generate ID barang (you might want to adjust this logic)
-        $idbarang = 'BRG' . date('YmdHis');
+        // Generate ID Inventory
+        $stmt = $pdo->query("SELECT COUNT(*) FROM inventory");
+        $count = $stmt->fetchColumn();
+        $idinventory = 'INV' . str_pad($count + 1, 3, '0', STR_PAD_LEFT);
+        
+        // Calculate total
+        $total = $harga * $stok_akhir;
         
         try {
-            $stmt = $pdo->prepare("INSERT INTO m_barang (idbarang, kodebarang, nama_barang, deskripsi, harga, satuan, kodeproject, idkategori) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
-            $stmt->execute([$idbarang, $kodebarang, $nama_barang, $deskripsi, $harga, $satuan, $kodeproject, $idkategori]);
-            $message = "Item berhasil ditambahkan";
-            $message_type = "success";
+            $pdo->beginTransaction();
+            
+            // Insert to m_barang first
+            $stmt = $pdo->prepare("INSERT INTO m_barang (idbarang, kodebarang, nama_barang, harga, satuan, idkategori) VALUES (?, ?, ?, ?, 'PCS', ?)");
+            $stmt->execute([$idbarang, $kodebarang, $nama_barang, $harga, $idkategori]);
+            
+            // Insert to inventory
+            $stmt = $pdo->prepare("
+                INSERT INTO inventory (
+                    idinventory, idbarang, kodebarang, nama_barang, 
+                    idkategori, lokasi, kodeproject, harga, 
+                    stok_awal, stok_akhir, qty_in, qty_out, total, keterangan
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
+            ");
+            $stmt->execute([
+                $idinventory, $idbarang, $kodebarang, $nama_barang,
+                $idkategori, $lokasi, $kodeproject, $harga,
+                $stok_awal, $stok_akhir, $total, $keterangan
+            ]);
+            
+            $pdo->commit();
+            
+            header('Location: inventory.php?tab=inventory&message=Item berhasil ditambahkan&message_type=success');
+            exit;
         } catch (Exception $e) {
-            $message = "Error menambahkan item: " . $e->getMessage();
-            $message_type = "error";
+            $pdo->rollBack();
+            header('Location: inventory.php?tab=inventory&message=Error: ' . urlencode($e->getMessage()) . '&message_type=error');
+            exit;
         }
-    } elseif (isset($_POST['edit_item'])) {
-        // Edit existing item
+    } elseif (isset($_POST['edit_item_inventory'])) {
         $idbarang = $_POST['idbarang'] ?? '';
         $kodebarang = $_POST['kodebarang'] ?? '';
         $nama_barang = $_POST['nama_barang'] ?? '';
@@ -47,11 +75,198 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         try {
             $stmt = $pdo->prepare("UPDATE m_barang SET kodebarang = ?, nama_barang = ?, deskripsi = ?, harga = ?, satuan = ?, kodeproject = ?, idkategori = ? WHERE idbarang = ?");
             $stmt->execute([$kodebarang, $nama_barang, $deskripsi, $harga, $satuan, $kodeproject, $idkategori, $idbarang]);
-            $message = "Item berhasil diupdate";
-            $message_type = "success";
+            
+            header('Location: inventory.php?tab=inventory&message=Item berhasil diupdate&message_type=success');
+            exit;
         } catch (Exception $e) {
-            $message = "Error mengupdate item: " . $e->getMessage();
-            $message_type = "error";
+            header('Location: inventory.php?tab=inventory&message=Error: ' . urlencode($e->getMessage()) . '&message_type=error');
+            exit;
+        }
+    }
+    
+    // HANDLE TAB IN - Insert barang masuk
+    if (isset($_POST['add_item_in'])) {
+        $tgl_masuk = $_POST['tgl_masuk'] ?? date('Y-m-d');
+        $idpurchaseorder = $_POST['idpurchaseorder'] ?? null;
+        $idbarang = $_POST['idbarang'] ?? '';
+        $jumlah = $_POST['jumlah'] ?? 0;
+        
+        // Validate idpurchaseorder if provided
+        if (!empty($idpurchaseorder)) {
+            // Check if PO exists
+            $checkPO = $pdo->prepare("SELECT idpurchaseorder FROM purchaseorder WHERE idpurchaseorder = ?");
+            $checkPO->execute([$idpurchaseorder]);
+            if (!$checkPO->fetch()) {
+                header('Location: inventory.php?tab=in&message=Error: ID Purchase Order tidak ditemukan&message_type=error');
+                exit;
+            }
+        } else {
+            // Set to NULL if empty
+            $idpurchaseorder = null;
+        }
+        
+        try {
+            $pdo->beginTransaction();
+            
+            // Insert to barangmasuk
+            $idmasuk = 'BM' . date('YmdHis');
+            $stmt = $pdo->prepare("INSERT INTO barangmasuk (idmasuk, tgl_masuk, idpurchaseorder) VALUES (?, ?, ?)");
+            $stmt->execute([$idmasuk, $tgl_masuk, $idpurchaseorder]);
+            
+            // Insert to detailmasuk
+            $stmt = $pdo->prepare("INSERT INTO detailmasuk (idmasuk, idbarang, jumlah) VALUES (?, ?, ?)");
+            $stmt->execute([$idmasuk, $idbarang, $jumlah]);
+            
+            // Update inventory stok_akhir
+            $stmt = $pdo->prepare("UPDATE inventory SET stok_akhir = stok_akhir + ? WHERE idbarang = ?");
+            $stmt->execute([$jumlah, $idbarang]);
+            
+            $pdo->commit();
+            
+            header('Location: inventory.php?tab=in&message=Barang masuk berhasil ditambahkan&message_type=success');
+            exit;
+        } catch (Exception $e) {
+            $pdo->rollBack();
+            header('Location: inventory.php?tab=in&message=Error: ' . urlencode($e->getMessage()) . '&message_type=error');
+            exit;
+        }
+    } elseif (isset($_POST['edit_item_in'])) {
+        $idmasuk = $_POST['idmasuk'] ?? '';
+        $tgl_masuk = $_POST['tgl_masuk'] ?? date('Y-m-d');
+        $idpurchaseorder = $_POST['idpurchaseorder'] ?? null;
+        $idbarang = $_POST['idbarang'] ?? '';
+        $jumlah = $_POST['jumlah'] ?? 0;
+        
+        // Validate idpurchaseorder if provided
+        if (!empty($idpurchaseorder)) {
+            // Check if PO exists
+            $checkPO = $pdo->prepare("SELECT idpurchaseorder FROM purchaseorder WHERE idpurchaseorder = ?");
+            $checkPO->execute([$idpurchaseorder]);
+            if (!$checkPO->fetch()) {
+                header('Location: inventory.php?tab=in&message=Error: ID Purchase Order tidak ditemukan&message_type=error');
+                exit;
+            }
+        } else {
+            // Set to NULL if empty
+            $idpurchaseorder = null;
+        }
+        
+        try {
+            $pdo->beginTransaction();
+            
+            // Get old quantity
+            $stmt = $pdo->prepare("SELECT jumlah FROM detailmasuk WHERE idmasuk = ?");
+            $stmt->execute([$idmasuk]);
+            $oldQty = $stmt->fetchColumn();
+            
+            // Update barangmasuk
+            $stmt = $pdo->prepare("UPDATE barangmasuk SET tgl_masuk = ?, idpurchaseorder = ? WHERE idmasuk = ?");
+            $stmt->execute([$tgl_masuk, $idpurchaseorder, $idmasuk]);
+            
+            // Update detailmasuk
+            $stmt = $pdo->prepare("UPDATE detailmasuk SET idbarang = ?, jumlah = ? WHERE idmasuk = ?");
+            $stmt->execute([$idbarang, $jumlah, $idmasuk]);
+            
+            // Update inventory (subtract old, add new)
+            $stmt = $pdo->prepare("UPDATE inventory SET stok_akhir = stok_akhir - ? + ? WHERE idbarang = ?");
+            $stmt->execute([$oldQty, $jumlah, $idbarang]);
+            
+            $pdo->commit();
+            
+            header('Location: inventory.php?tab=in&message=Barang masuk berhasil diupdate&message_type=success');
+            exit;
+        } catch (Exception $e) {
+            $pdo->rollBack();
+            header('Location: inventory.php?tab=in&message=Error: ' . urlencode($e->getMessage()) . '&message_type=error');
+            exit;
+        }
+    }
+    
+    // HANDLE TAB OUT - Insert barang keluar
+    if (isset($_POST['add_item_out'])) {
+        $tgl_keluar = $_POST['tgl_keluar'] ?? date('Y-m-d');
+        $idbarang = $_POST['idbarang'] ?? '';
+        $jumlah = $_POST['jumlah'] ?? 0;
+        $keterangan = $_POST['keterangan'] ?? '';
+        
+        try {
+            $pdo->beginTransaction();
+            
+            // Check stock availability
+            $stmt = $pdo->prepare("SELECT stok_akhir FROM inventory WHERE idbarang = ?");
+            $stmt->execute([$idbarang]);
+            $currentStock = $stmt->fetchColumn();
+            
+            if ($currentStock < $jumlah) {
+                throw new Exception('Stok tidak mencukupi!');
+            }
+            
+            // Insert to barangkeluar
+            $idkeluar = 'BK' . date('YmdHis');
+            $stmt = $pdo->prepare("INSERT INTO barangkeluar (idkeluar, tgl_keluar, keterangan) VALUES (?, ?, ?)");
+            $stmt->execute([$idkeluar, $tgl_keluar, $keterangan]);
+            
+            // Insert to detailkeluar
+            $stmt = $pdo->prepare("INSERT INTO detailkeluar (idkeluar, idbarang, jumlah) VALUES (?, ?, ?)");
+            $stmt->execute([$idkeluar, $idbarang, $jumlah]);
+            
+            // Update inventory stok_akhir
+            $stmt = $pdo->prepare("UPDATE inventory SET stok_akhir = stok_akhir - ? WHERE idbarang = ?");
+            $stmt->execute([$jumlah, $idbarang]);
+            
+            $pdo->commit();
+            
+            header('Location: inventory.php?tab=out&message=Barang keluar berhasil ditambahkan&message_type=success');
+            exit;
+        } catch (Exception $e) {
+            $pdo->rollBack();
+            header('Location: inventory.php?tab=out&message=Error: ' . urlencode($e->getMessage()) . '&message_type=error');
+            exit;
+        }
+    } elseif (isset($_POST['edit_item_out'])) {
+        $idkeluar = $_POST['idkeluar'] ?? '';
+        $tgl_keluar = $_POST['tgl_keluar'] ?? date('Y-m-d');
+        $idbarang = $_POST['idbarang'] ?? '';
+        $jumlah = $_POST['jumlah'] ?? 0;
+        $keterangan = $_POST['keterangan'] ?? '';
+        
+        try {
+            $pdo->beginTransaction();
+            
+            // Get old quantity
+            $stmt = $pdo->prepare("SELECT jumlah FROM detailkeluar WHERE idkeluar = ?");
+            $stmt->execute([$idkeluar]);
+            $oldQty = $stmt->fetchColumn();
+            
+            // Check stock availability (add back old, subtract new)
+            $stmt = $pdo->prepare("SELECT stok_akhir FROM inventory WHERE idbarang = ?");
+            $stmt->execute([$idbarang]);
+            $currentStock = $stmt->fetchColumn();
+            
+            if (($currentStock + $oldQty) < $jumlah) {
+                throw new Exception('Stok tidak mencukupi!');
+            }
+            
+            // Update barangkeluar
+            $stmt = $pdo->prepare("UPDATE barangkeluar SET tgl_keluar = ?, keterangan = ? WHERE idkeluar = ?");
+            $stmt->execute([$tgl_keluar, $keterangan, $idkeluar]);
+            
+            // Update detailkeluar
+            $stmt = $pdo->prepare("UPDATE detailkeluar SET idbarang = ?, jumlah = ? WHERE idkeluar = ?");
+            $stmt->execute([$idbarang, $jumlah, $idkeluar]);
+            
+            // Update inventory (add back old, subtract new)
+            $stmt = $pdo->prepare("UPDATE inventory SET stok_akhir = stok_akhir + ? - ? WHERE idbarang = ?");
+            $stmt->execute([$oldQty, $jumlah, $idbarang]);
+            
+            $pdo->commit();
+            
+            header('Location: inventory.php?tab=out&message=Barang keluar berhasil diupdate&message_type=success');
+            exit;
+        } catch (Exception $e) {
+            $pdo->rollBack();
+            header('Location: inventory.php?tab=out&message=Error: ' . urlencode($e->getMessage()) . '&message_type=error');
+            exit;
         }
     }
 }
@@ -73,7 +288,11 @@ if (isset($_GET['month']) && $_GET['month'] !== '' && $_GET['month'] !== '0' && 
 
 $search = $_GET['search'] ?? '';
 $page = isset($_GET['page']) ? (int)$_GET['page'] : 1;
-$limit = 25;
+$limit = isset($_GET['limit']) ? (int)$_GET['limit'] : 25;
+// Ensure limit is one of the allowed values
+if (!in_array($limit, [10, 25, 50, 100])) {
+    $limit = 25;
+}
 $offset = ($page - 1) * $limit;
 
 // Query untuk Total Inventory
@@ -309,6 +528,7 @@ if ($activeTab == 'inventory') {
         SELECT 
             bm.idmasuk,
             bm.tgl_masuk,
+            bm.idpurchaseorder,
             po.idpurchaseorder as nopo,
             mb.kodebarang,
             mb.nama_barang,
@@ -565,6 +785,26 @@ $title = 'Inventory';
             </div>
 
             <div class="p-6">
+                
+                <!-- Display Success/Error Messages -->
+                <?php if (isset($_GET['message'])): ?>
+                <div id="alertMessage" class="mb-4 p-4 rounded-lg <?= $_GET['message_type'] === 'success' ? 'bg-green-100 border border-green-400 text-green-700' : 'bg-red-100 border border-red-400 text-red-700' ?>">
+                    <div class="flex items-center">
+                        <i class="fas <?= $_GET['message_type'] === 'success' ? 'fa-check-circle' : 'fa-exclamation-circle' ?> mr-2"></i>
+                        <span><?= htmlspecialchars($_GET['message']) ?></span>
+                        <button onclick="document.getElementById('alertMessage').style.display='none'" class="ml-auto text-gray-500 hover:text-gray-700">
+                            <i class="fas fa-times"></i>
+                        </button>
+                    </div>
+                </div>
+                <script>
+                    // Auto hide alert after 5 seconds
+                    setTimeout(function() {
+                        const alert = document.getElementById('alertMessage');
+                        if (alert) alert.style.display = 'none';
+                    }, 5000);
+                </script>
+                <?php endif; ?>
 
                 <!-- OVERVIEW TAB -->
                 <?php if ($activeTab == 'overview'): ?>
@@ -662,9 +902,10 @@ $title = 'Inventory';
                 <!-- INVENTORY TAB -->
                 <?php if ($activeTab == 'inventory'): ?>
                 <div>
-                    <!-- Toolbar -->
-                    <div class="flex justify-between items-center mb-6">
+                    <!-- Action Buttons Row -->
+                    <div class="flex justify-start items-center mb-4">
                         <div class="flex gap-2">
+                            <?php if ($_SESSION['role'] === 'Admin' || $_SESSION['role'] === 'Procurement' || $_SESSION['role'] === 'Leader' || $_SESSION['role'] === 'Manager'): ?>
                             <button onclick="showAddForm()" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center gap-2">
                                 <i class="fas fa-plus"></i>
                                 Add
@@ -673,63 +914,55 @@ $title = 'Inventory';
                                 <i class="fas fa-edit"></i>
                                 Edit
                             </button>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                    
+                    <!-- Toolbar with Entries and Search -->
+                    <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 gap-4">
+                        <div class="flex flex-wrap items-center gap-4">
+                            <!-- Entries Dropdown -->
+                            <div class="flex items-center gap-2">
+                                <label class="text-sm text-gray-700 font-medium">Show</label>
+                                <select id="entries-inventory" onchange="changeEntries('inventory')" class="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+                                    <option value="10" <?= $limit == 10 ? 'selected' : '' ?>>10</option>
+                                    <option value="25" <?= $limit == 25 ? 'selected' : '' ?>>25</option>
+                                    <option value="50" <?= $limit == 50 ? 'selected' : '' ?>>50</option>
+                                    <option value="100" <?= $limit == 100 ? 'selected' : '' ?>>100</option>
+                                </select>
+                                <span class="text-sm text-gray-700">entries</span>
+                            </div>
                         </div>
                         
-                        <div class="flex gap-4 items-center">
+                        <div class="flex flex-wrap items-center gap-4">
+                            <!-- Search Input -->
                             <div class="relative">
-                                <input type="text" id="search-<?= $activeTab ?>" placeholder="Search..." class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-64" onkeyup="handleSearch(event)">
-                                <button onclick="performSearch()" class="absolute right-3 top-2.5 text-gray-400 hover:text-gray-600">
-                                    <i class="fas fa-search"></i>
+                                <input type="text" id="search-inventory" placeholder="Search..." onkeyup="searchTable('inventory')" class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-64">
+                                <button onclick="clearSearch('inventory')" class="absolute right-3 top-2.5 text-gray-400 hover:text-gray-600">
+                                    <i class="fas fa-times"></i>
                                 </button>
                             </div>
-                            
-                            <div>
-                                <select onchange="filterData()" id="filter-month-<?= $activeTab ?>" class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-32">
-                                    <option value="0" <?= $selectedMonth == 0 ? 'selected' : '' ?>>All Months</option>
-                                    <?php for($m = 1; $m <= 12; $m++): ?>
-                                    <option value="<?= $m ?>" <?= $selectedMonth == $m ? 'selected' : '' ?>><?= date('F', mktime(0, 0, 0, $m, 1)) ?></option>
-                                    <?php endfor; ?>
-                                </select>
-                            </div>
-                            
-                            <div>
-                                <select onchange="filterData()" id="filter-year-<?= $activeTab ?>" class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-32">
-                                    <option value="0" <?= $selectedYear == 0 ? 'selected' : '' ?>>All Years</option>
-                                    <?php for($y = date('Y'); $y >= 2020; $y--): ?>
-                                    <option value="<?= $y ?>" <?= $selectedYear == $y ? 'selected' : '' ?>><?= $y ?></option>
-                                    <?php endfor; ?>
-                                </select>
-                            </div>
-                            
-                            <button onclick="downloadReport()" class="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 flex items-center gap-2">
-                                <i class="fas fa-download"></i>
-                                Download
-                            </button>
                         </div>
                     </div>
 
                     <!-- Table -->
-                    <div class="overflow-x-auto">
-                        <table class="min-w-full divide-y divide-gray-200">
-                            <thead class="bg-gray-50">
+                    <div class="overflow-x-auto rounded-lg border border-gray-200 shadow-sm table-container">
+                        <table id="inventory-table" class="min-w-full divide-y divide-gray-200">
+                            <thead class="bg-gradient-to-r from-blue-50 to-indigo-50">
                                 <tr>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" width="50">#</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">kodebarang</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">kodeproject</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">kategori</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">lokasi</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">nama_barang</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">harga</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">stok_awal</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">stok_akhir</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">total</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">keterangan</th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200 cursor-pointer hover:bg-blue-100 transition" onclick="sortTable('inventory', 0)" width="50">#<i class="fas fa-sort sort-arrow text-gray-400 ml-1"></i></th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200 cursor-pointer hover:bg-blue-100 transition" onclick="sortTable('inventory', 1)">Kode Barang<i class="fas fa-sort sort-arrow text-gray-400 ml-1"></i></th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200 cursor-pointer hover:bg-blue-100 transition" onclick="sortTable('inventory', 2)">Nama Barang<i class="fas fa-sort sort-arrow text-gray-400 ml-1"></i></th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200 cursor-pointer hover:bg-blue-100 transition" onclick="sortTable('inventory', 3)">Kategori<i class="fas fa-sort sort-arrow text-gray-400 ml-1"></i></th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200 cursor-pointer hover:bg-blue-100 transition" onclick="sortTable('inventory', 4)">Stok Akhir<i class="fas fa-sort sort-arrow text-gray-400 ml-1"></i></th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200 cursor-pointer hover:bg-blue-100 transition" onclick="sortTable('inventory', 5)">Harga<i class="fas fa-sort sort-arrow text-gray-400 ml-1"></i></th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200 cursor-pointer hover:bg-blue-100 transition" onclick="sortTable('inventory', 6)">Total<i class="fas fa-sort sort-arrow text-gray-400 ml-1"></i></th>
                                 </tr>
                             </thead>
-                            <tbody class="bg-white divide-y divide-gray-200">
+                            <tbody class="bg-white divide-y divide-gray-100">
                                 <?php if (empty($items)): ?>
                                     <tr>
-                                        <td colspan="13" class="px-6 py-4 text-center text-gray-500">
+                                        <td colspan="7" class="px-6 py-4 text-center text-gray-500">
                                             Tidak ada data
                                         </td>
                                     </tr>
@@ -737,18 +970,22 @@ $title = 'Inventory';
                                     <?php 
                                     $row_number = $offset + 1;
                                     foreach ($items as $item): ?>
-                                    <tr class="hover:bg-gray-50 cursor-pointer" onclick="selectRow(this)">
+                                    <tr class="hover:bg-blue-50 transition-colors duration-150 cursor-pointer selectable-row" onclick="selectRow(this)">
                                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= $row_number++ ?></td>
                                         <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900"><strong><?= htmlspecialchars($item['kodebarang'] ?? '-') ?></strong></td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= htmlspecialchars($item['kodeproject'] ?? '-') ?></td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= htmlspecialchars($item['kategori'] ?? '-') ?></td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= htmlspecialchars($item['lokasi'] ?? '-') ?></td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= htmlspecialchars($item['nama_barang'] ?? '-') ?></td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= number_format($item['harga'] ?? 0, 2) ?></td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= number_format($item['stok_awal'] ?? 0) ?></td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= number_format($item['stok_akhir'] ?? 0) ?></td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= number_format($item['total'] ?? 0, 2) ?></td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= htmlspecialchars($item['keterangan'] ?? '-') ?></td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700"><?= htmlspecialchars($item['nama_barang'] ?? '-') ?></td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                            <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                                                <?= htmlspecialchars($item['kategori'] ?? '-') ?>
+                                            </span>
+                                        </td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 text-center">
+                                            <span class="inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-semibold bg-green-100 text-green-800 border border-green-200">
+                                                <?= number_format($item['stok_akhir'] ?? 0) ?>
+                                            </span>
+                                        </td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900 font-medium">Rp <?= number_format($item['harga'] ?? 0, 0, ',', '.') ?></td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900 font-semibold">Rp <?= number_format($item['total'] ?? 0, 0, ',', '.') ?></td>
                                     </tr>
                                     <?php endforeach; ?>
                                 <?php endif; ?>
@@ -810,9 +1047,10 @@ $title = 'Inventory';
                 <!-- IN TAB -->
                 <?php if ($activeTab == 'in'): ?>
                 <div>
-                    <!-- Toolbar -->
-                    <div class="flex justify-between items-center mb-6">
+                    <!-- Action Buttons Row -->
+                    <div class="flex justify-start items-center mb-4">
                         <div class="flex gap-2">
+                            <?php if ($_SESSION['role'] === 'Admin' || $_SESSION['role'] === 'Procurement' || $_SESSION['role'] === 'Leader' || $_SESSION['role'] === 'Manager'): ?>
                             <button onclick="showAddForm()" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center gap-2">
                                 <i class="fas fa-plus"></i>
                                 Add
@@ -821,59 +1059,77 @@ $title = 'Inventory';
                                 <i class="fas fa-edit"></i>
                                 Edit
                             </button>
+                            <?php endif; ?>
                         </div>
-                        <div class="flex gap-4 items-center">
-                            <div>
-                                <select onchange="filterData()" id="filter-month-<?= $activeTab ?>" class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-32">
-                                    <option value="0" <?= $selectedMonth == 0 ? 'selected' : '' ?>>All Months</option>
-                                    <?php for($m = 1; $m <= 12; $m++): ?>
-                                    <option value="<?= $m ?>" <?= $selectedMonth == $m ? 'selected' : '' ?>><?= date('F', mktime(0, 0, 0, $m, 1)) ?></option>
-                                    <?php endfor; ?>
+                    </div>
+                    
+                    <!-- Toolbar with Entries and Search -->
+                    <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 gap-4">
+                        <div class="flex flex-wrap items-center gap-4">
+                            <!-- Entries Dropdown -->
+                            <div class="flex items-center gap-2">
+                                <label class="text-sm text-gray-700 font-medium">Show</label>
+                                <select id="entries-in" onchange="changeEntries('in')" class="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+                                    <option value="10" <?= $limit == 10 ? 'selected' : '' ?>>10</option>
+                                    <option value="25" <?= $limit == 25 ? 'selected' : '' ?>>25</option>
+                                    <option value="50" <?= $limit == 50 ? 'selected' : '' ?>>50</option>
+                                    <option value="100" <?= $limit == 100 ? 'selected' : '' ?>>100</option>
                                 </select>
+                                <span class="text-sm text-gray-700">entries</span>
                             </div>
-                            <div>
-                                <select onchange="filterData()" id="filter-year-<?= $activeTab ?>" class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-32">
-                                    <option value="0" <?= $selectedYear == 0 ? 'selected' : '' ?>>All Years</option>
-                                    <?php for($y = date('Y'); $y >= 2020; $y--): ?>
-                                    <option value="<?= $y ?>" <?= $selectedYear == $y ? 'selected' : '' ?>><?= $y ?></option>
-                                    <?php endfor; ?>
-                                </select>
+                        </div>
+                        
+                        <div class="flex flex-wrap items-center gap-4">
+                            <!-- Search Input -->
+                            <div class="relative">
+                                <input type="text" id="search-in" placeholder="Search..." onkeyup="searchTable('in')" class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-64">
+                                <button onclick="clearSearch('in')" class="absolute right-3 top-2.5 text-gray-400 hover:text-gray-600">
+                                    <i class="fas fa-times"></i>
+                                </button>
                             </div>
                         </div>
                     </div>
+                    
                     <!-- Table -->
-                    <div class="overflow-x-auto">
-                        <table class="min-w-full divide-y divide-gray-200">
-                            <thead class="bg-gray-50">
+                    <div class="overflow-x-auto rounded-lg border border-gray-200 shadow-sm table-container">
+                        <table id="in-table" class="min-w-full divide-y divide-gray-200">
+                            <thead class="bg-gradient-to-r from-blue-50 to-indigo-50">
                                 <tr>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" width="50">#</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Tanggal Masuk</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">No PO</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Kode Barang</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Nama Barang</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Supplier</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Keterangan</th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200 cursor-pointer hover:bg-blue-100 transition" onclick="sortTable('in', 0)" width="50">#<i class="fas fa-sort sort-arrow text-gray-400 ml-1"></i></th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200 cursor-pointer hover:bg-blue-100 transition" onclick="sortTable('in', 1)">Tanggal Masuk<i class="fas fa-sort sort-arrow text-gray-400 ml-1"></i></th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200 cursor-pointer hover:bg-blue-100 transition" onclick="sortTable('in', 2)">No PO<i class="fas fa-sort sort-arrow text-gray-400 ml-1"></i></th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200 cursor-pointer hover:bg-blue-100 transition" onclick="sortTable('in', 3)">Kode Barang<i class="fas fa-sort sort-arrow text-gray-400 ml-1"></i></th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200 cursor-pointer hover:bg-blue-100 transition" onclick="sortTable('in', 4)">Nama Barang<i class="fas fa-sort sort-arrow text-gray-400 ml-1"></i></th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200 cursor-pointer hover:bg-blue-100 transition" onclick="sortTable('in', 5)">Qty<i class="fas fa-sort sort-arrow text-gray-400 ml-1"></i></th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200 cursor-pointer hover:bg-blue-100 transition" onclick="sortTable('in', 6)">Keterangan<i class="fas fa-sort sort-arrow text-gray-400 ml-1"></i></th>
                                 </tr>
                             </thead>
-                            <tbody class="bg-white divide-y divide-gray-200">
+                            <tbody class="bg-white divide-y divide-gray-100">
                                 <?php if (empty($items)): ?>
                                     <tr>
                                         <td colspan="7" class="px-6 py-4 text-center text-gray-500">
-                                            Tidak ada data
+                                            No inbound transactions found
                                         </td>
                                     </tr>
                                 <?php else: ?>
                                     <?php 
                                     $row_number = $offset + 1;
                                     foreach ($items as $item): ?>
-                                    <tr class="hover:bg-gray-50 cursor-pointer" onclick="selectRow(this)">
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?php echo $row_number++; ?></td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900"><?php echo htmlspecialchars($item['tgl_masuk'] ?? '-'); ?></td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?php echo htmlspecialchars($item['nopo'] ?? '-'); ?></td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><strong><?php echo htmlspecialchars($item['kodebarang'] ?? '-'); ?></strong></td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?php echo htmlspecialchars($item['nama_barang'] ?? '-'); ?></td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?php echo htmlspecialchars($item['supplier'] ?? '-'); ?></td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?php echo htmlspecialchars($item['keterangan'] ?? '-'); ?></td>
+                                    <tr class="hover:bg-blue-50 transition-colors duration-150 cursor-pointer selectable-row" 
+                                        data-id="<?= htmlspecialchars($item['idmasuk']) ?>"
+                                        data-idpurchaseorder="<?= htmlspecialchars($item['idpurchaseorder'] ?? '') ?>"
+                                        onclick="selectRow(this)">
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= $row_number++ ?></td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700"><?= date('d M Y', strtotime($item['tgl_masuk'] ?? date('Y-m-d'))) ?></td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-blue-600"><?= htmlspecialchars($item['nopo'] ?? '-') ?></td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900"><strong><?= htmlspecialchars($item['kodebarang'] ?? '-') ?></strong></td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700"><?= htmlspecialchars($item['nama_barang'] ?? '-') ?></td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 text-center">
+                                            <span class="inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-semibold bg-green-100 text-green-800 border border-green-200">
+                                                <?= number_format($item['qty'] ?? $item['jumlah'] ?? 0) ?>
+                                            </span>
+                                        </td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= htmlspecialchars($item['keterangan'] ?? '-') ?></td>
                                     </tr>
                                     <?php endforeach; ?>
                                 <?php endif; ?>
@@ -935,9 +1191,10 @@ $title = 'Inventory';
                 <!-- OUT TAB -->
                 <?php if ($activeTab == 'out'): ?>
                 <div>
-                    <!-- Toolbar -->
-                    <div class="flex justify-between items-center mb-6">
+                    <!-- Action Buttons Row -->
+                    <div class="flex justify-start items-center mb-4">
                         <div class="flex gap-2">
+                            <?php if ($_SESSION['role'] === 'Admin' || $_SESSION['role'] === 'Procurement' || $_SESSION['role'] === 'Leader' || $_SESSION['role'] === 'Manager'): ?>
                             <button onclick="showAddForm()" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center gap-2">
                                 <i class="fas fa-plus"></i>
                                 Add
@@ -946,41 +1203,53 @@ $title = 'Inventory';
                                 <i class="fas fa-edit"></i>
                                 Edit
                             </button>
+                            <?php endif; ?>
                         </div>
-                        <div class="flex gap-4 items-center">
-                            <div>
-                                <select onchange="filterData()" id="filter-month-<?= $activeTab ?>" class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-32">
-                                    <option value="0" <?= $selectedMonth == 0 ? 'selected' : '' ?>>All Months</option>
-                                    <?php for($m = 1; $m <= 12; $m++): ?>
-                                    <option value="<?= $m ?>" <?= $selectedMonth == $m ? 'selected' : '' ?>><?= date('F', mktime(0, 0, 0, $m, 1)) ?></option>
-                                    <?php endfor; ?>
+                    </div>
+                    
+                    <!-- Toolbar with Entries and Search -->
+                    <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 gap-4">
+                        <div class="flex flex-wrap items-center gap-4">
+                            <!-- Entries Dropdown -->
+                            <div class="flex items-center gap-2">
+                                <label class="text-sm text-gray-700 font-medium">Show</label>
+                                <select id="entries-out" onchange="changeEntries('out')" class="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+                                    <option value="10" <?= $limit == 10 ? 'selected' : '' ?>>10</option>
+                                    <option value="25" <?= $limit == 25 ? 'selected' : '' ?>>25</option>
+                                    <option value="50" <?= $limit == 50 ? 'selected' : '' ?>>50</option>
+                                    <option value="100" <?= $limit == 100 ? 'selected' : '' ?>>100</option>
                                 </select>
-                            </div>
-                            <div>
-                                <select onchange="filterData()" id="filter-year-<?= $activeTab ?>" class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-32">
-                                    <option value="0" <?= $selectedYear == 0 ? 'selected' : '' ?>>All Years</option>
-                                    <?php for($y = date('Y'); $y >= 2020; $y--): ?>
-                                    <option value="<?= $y ?>" <?= $selectedYear == $y ? 'selected' : '' ?>><?= $y ?></option>
-                                    <?php endfor; ?>
-                                </select>
+                                <span class="text-sm text-gray-700">entries</span>
                             </div>
                         </div>
-                    </div>                    <!-- Table -->
-                    <div class="overflow-x-auto">
-                        <table class="min-w-full divide-y divide-gray-200">
-                            <thead class="bg-gray-50">
+                        
+                        <div class="flex flex-wrap items-center gap-4">
+                            <!-- Search Input -->
+                            <div class="relative">
+                                <input type="text" id="search-out" placeholder="Search..." onkeyup="searchTable('out')" class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-64">
+                                <button onclick="clearSearch('out')" class="absolute right-3 top-2.5 text-gray-400 hover:text-gray-600">
+                                    <i class="fas fa-times"></i>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Table -->
+                    <div class="overflow-x-auto rounded-lg border border-gray-200 shadow-sm table-container">
+                        <table id="out-table" class="min-w-full divide-y divide-gray-200">
+                            <thead class="bg-gradient-to-r from-blue-50 to-indigo-50">
                                 <tr>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" width="50">#</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Tanggal Keluar</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Kode Barang</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Nama Barang</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Qty</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Harga</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Total</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Keterangan</th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200 cursor-pointer hover:bg-blue-100 transition" onclick="sortTable('out', 0)" width="50">#<i class="fas fa-sort sort-arrow text-gray-400 ml-1"></i></th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200 cursor-pointer hover:bg-blue-100 transition" onclick="sortTable('out', 1)">Tanggal Keluar<i class="fas fa-sort sort-arrow text-gray-400 ml-1"></i></th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200 cursor-pointer hover:bg-blue-100 transition" onclick="sortTable('out', 2)">Kode Barang<i class="fas fa-sort sort-arrow text-gray-400 ml-1"></i></th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200 cursor-pointer hover:bg-blue-100 transition" onclick="sortTable('out', 3)">Nama Barang<i class="fas fa-sort sort-arrow text-gray-400 ml-1"></i></th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200 cursor-pointer hover:bg-blue-100 transition" onclick="sortTable('out', 4)">Qty<i class="fas fa-sort sort-arrow text-gray-400 ml-1"></i></th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200 cursor-pointer hover:bg-blue-100 transition" onclick="sortTable('out', 5)">Harga<i class="fas fa-sort sort-arrow text-gray-400 ml-1"></i></th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200 cursor-pointer hover:bg-blue-100 transition" onclick="sortTable('out', 6)">Total<i class="fas fa-sort sort-arrow text-gray-400 ml-1"></i></th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200 cursor-pointer hover:bg-blue-100 transition" onclick="sortTable('out', 7)">Keterangan<i class="fas fa-sort sort-arrow text-gray-400 ml-1"></i></th>
                                 </tr>
                             </thead>
-                            <tbody class="bg-white divide-y divide-gray-200">
+                            <tbody class="bg-white divide-y divide-gray-100">
                                 <?php if (empty($items)): ?>
                                     <tr>
                                         <td colspan="8" class="px-6 py-4 text-center text-gray-500">
@@ -1356,13 +1625,25 @@ $title = 'Inventory';
         alert('Download functionality would be implemented here');
     }
     
-    // Show add form function
+    // Show add form function - opens different modal based on active tab
     function showAddForm() {
-        document.getElementById('addItemModal').classList.remove('hidden');
+        const urlParams = new URLSearchParams(window.location.search);
+        const activeTab = urlParams.get('tab') || 'inventory';
+        
+        if (activeTab === 'in') {
+            document.getElementById('addInModal').classList.remove('hidden');
+        } else if (activeTab === 'out') {
+            document.getElementById('addOutModal').classList.remove('hidden');
+        } else {
+            document.getElementById('addItemModal').classList.remove('hidden');
+        }
     }
     
-    // Show edit form function
+    // Show edit form function - opens different modal based on active tab
     function showEditForm() {
+        const urlParams = new URLSearchParams(window.location.search);
+        const activeTab = urlParams.get('tab') || 'inventory';
+        
         // Get selected row
         const selectedRow = document.querySelector('tbody tr.bg-blue-50');
         if (!selectedRow) {
@@ -1370,19 +1651,40 @@ $title = 'Inventory';
             return;
         }
         
-        // Get data from selected row
-        const cells = selectedRow.querySelectorAll('td');
-        const idbarang = cells[1].textContent.trim();
-        
-        // Fetch item details (in a real implementation, this would be an AJAX call)
-        // For now, we'll just populate with the data we have
-        document.getElementById('edit_idbarang').value = idbarang;
-        document.getElementById('edit_idbarang_display').value = idbarang;
-        document.getElementById('edit_kodebarang').value = cells[2].textContent.trim();
-        document.getElementById('edit_nama_barang').value = cells[3].textContent.trim();
-        
-        // Show the modal
-        document.getElementById('editItemModal').classList.remove('hidden');
+        if (activeTab === 'in') {
+            // Edit barang masuk
+            const cells = selectedRow.querySelectorAll('td');
+            document.getElementById('edit_in_idmasuk').value = selectedRow.getAttribute('data-id');
+            document.getElementById('edit_in_tgl_masuk').value = cells[1].textContent.trim();
+            document.getElementById('edit_in_idbarang').value = cells[2].textContent.trim();
+            document.getElementById('edit_in_jumlah').value = cells[5].textContent.trim();
+            
+            // Set idpurchaseorder if exists
+            const idpurchaseorder = selectedRow.getAttribute('data-idpurchaseorder') || '';
+            document.getElementById('edit_in_idpurchaseorder').value = idpurchaseorder;
+            
+            document.getElementById('editInModal').classList.remove('hidden');
+        } else if (activeTab === 'out') {
+            // Edit barang keluar
+            const cells = selectedRow.querySelectorAll('td');
+            document.getElementById('edit_out_idkeluar').value = selectedRow.getAttribute('data-id');
+            document.getElementById('edit_out_tgl_keluar').value = cells[1].textContent.trim();
+            document.getElementById('edit_out_idbarang').value = cells[2].textContent.trim();
+            document.getElementById('edit_out_jumlah').value = cells[4].textContent.trim();
+            document.getElementById('edit_out_keterangan').value = cells[5].textContent.trim();
+            document.getElementById('editOutModal').classList.remove('hidden');
+        } else {
+            // Edit inventory item
+            const cells = selectedRow.querySelectorAll('td');
+            const idbarang = cells[1].textContent.trim();
+            
+            document.getElementById('edit_idbarang').value = idbarang;
+            document.getElementById('edit_idbarang_display').value = idbarang;
+            document.getElementById('edit_kodebarang').value = cells[2].textContent.trim();
+            document.getElementById('edit_nama_barang').value = cells[3].textContent.trim();
+            
+            document.getElementById('editItemModal').classList.remove('hidden');
+        }
     }
     
     // Close modal function
@@ -1444,6 +1746,157 @@ $title = 'Inventory';
         // Navigate to the new URL
         window.location.href = url;
     }
+
+// Client-side Table Features for Inventory
+let currentSort = { inventory: { column: -1, direction: 'asc' } };
+
+// Search table function
+function searchTable(tableType) {
+    const searchTerm = document.getElementById(`search-${tableType}`).value.toLowerCase();
+    filterAndDisplayTable(tableType, searchTerm);
+}
+
+// Clear search
+function clearSearch(tableType) {
+    document.getElementById(`search-${tableType}`).value = '';
+    filterAndDisplayTable(tableType, '');
+}
+
+// Combined filter and display
+function filterAndDisplayTable(tableType, searchTerm) {
+    const table = document.getElementById(`${tableType}-table`);
+    if (!table) return;
+    
+    const tbody = table.querySelector('tbody');
+    const rows = tbody.querySelectorAll('tr');
+    
+    let visibleCount = 0;
+    
+    rows.forEach((row, index) => {
+        const cells = row.querySelectorAll('td');
+        let rowText = '';
+        cells.forEach(cell => {
+            rowText += cell.textContent.toLowerCase() + ' ';
+        });
+        
+        // Check if row matches search
+        const matchesSearch = !searchTerm || rowText.includes(searchTerm);
+        
+        // Show/hide row
+        if (matchesSearch) {
+            row.style.display = '';
+            visibleCount++;
+        } else {
+            row.style.display = 'none';
+        }
+    });
+    
+    // Update info text
+    updateTableInfo(tableType, visibleCount);
+}
+
+// Update table info text
+function updateTableInfo(tableType, visibleCount) {
+    const table = document.getElementById(`${tableType}-table`);
+    if (!table) return;
+    
+    const tbody = table.querySelector('tbody');
+    const totalRows = tbody.querySelectorAll('tr').length;
+    
+    // Create or update info text
+    let infoDiv = document.getElementById(`info-${tableType}`);
+    if (!infoDiv) {
+        infoDiv = document.createElement('div');
+        infoDiv.id = `info-${tableType}`;
+        infoDiv.className = 'text-sm text-gray-700 mt-2';
+        table.parentElement.appendChild(infoDiv);
+    }
+    
+    infoDiv.textContent = `Showing ${visibleCount} of ${totalRows} entries`;
+}
+
+// Change entries per page - reload with new limit
+function changeEntries(tableType) {
+    const entries = parseInt(document.getElementById(`entries-${tableType}`).value);
+    
+    // Get current URL parameters
+    const urlParams = new URLSearchParams(window.location.search);
+    
+    // Update limit parameter
+    urlParams.set('limit', entries);
+    urlParams.set('page', '1'); // Reset to first page
+    
+    // Reload page with new parameters
+    window.location.search = urlParams.toString();
+}
+
+// Sort table by column
+function sortTable(tableType, columnIndex) {
+    const table = document.getElementById(`${tableType}-table`);
+    if (!table) return;
+    
+    const tbody = table.querySelector('tbody');
+    const rows = Array.from(tbody.querySelectorAll('tr'));
+    
+    // Toggle sort direction
+    if (currentSort[tableType].column === columnIndex) {
+        currentSort[tableType].direction = currentSort[tableType].direction === 'asc' ? 'desc' : 'asc';
+    } else {
+        currentSort[tableType].column = columnIndex;
+        currentSort[tableType].direction = 'asc';
+    }
+    
+    // Sort rows
+    rows.sort((a, b) => {
+        const aText = a.cells[columnIndex]?.textContent.trim() || '';
+        const bText = b.cells[columnIndex]?.textContent.trim() || '';
+        
+        // Try to parse as numbers (remove 'Rp' and commas)
+        const aNum = parseFloat(aText.replace(/[^0-9.-]/g, ''));
+        const bNum = parseFloat(bText.replace(/[^0-9.-]/g, ''));
+        
+        let comparison = 0;
+        if (!isNaN(aNum) && !isNaN(bNum)) {
+            comparison = aNum - bNum;
+        } else {
+            comparison = aText.localeCompare(bText);
+        }
+        
+        return currentSort[tableType].direction === 'asc' ? comparison : -comparison;
+    });
+    
+    // Re-append sorted rows
+    rows.forEach(row => tbody.appendChild(row));
+    
+    // Update sort indicators
+    updateSortIndicators(tableType, columnIndex);
+}
+
+// Update sort indicators in table header
+function updateSortIndicators(tableType, columnIndex) {
+    const table = document.getElementById(`${tableType}-table`);
+    if (!table) return;
+    
+    const headers = table.querySelectorAll('thead th');
+    headers.forEach((header, index) => {
+        // Remove existing arrows
+        const existingArrow = header.querySelector('.sort-arrow');
+        if (existingArrow) {
+            existingArrow.remove();
+        }
+        
+        // Add arrow to sorted column
+        if (index === columnIndex) {
+            const arrow = document.createElement('i');
+            arrow.className = `fas fa-sort-${currentSort[tableType].direction === 'asc' ? 'up' : 'down'} sort-arrow text-blue-600 ml-1`;
+            header.appendChild(arrow);
+        } else {
+            const arrow = document.createElement('i');
+            arrow.className = 'fas fa-sort sort-arrow text-gray-400 ml-1';
+            header.appendChild(arrow);
+        }
+    });
+}
 </script>
 
 <!-- Add Item Modal -->
@@ -1457,50 +1910,25 @@ $title = 'Inventory';
                 </button>
             </div>
             <form id="addItemForm" method="POST" action="">
-                <input type="hidden" name="add_item" value="1">
+                <input type="hidden" name="add_item_inventory" value="1">
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
                     <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">Kode Barang</label>
-                        <input type="text" name="kodebarang" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500" required>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">ID Barang <span class="text-red-500">*</span></label>
+                        <input type="text" name="idbarang" placeholder="Contoh: B001" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500" required>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">Nama Barang</label>
-                        <input type="text" name="nama_barang" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500" required>
-                    </div>
-                    <div class="md:col-span-2">
-                        <label class="block text-sm font-medium text-gray-700 mb-1">Deskripsi</label>
-                        <textarea name="deskripsi" rows="3" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"></textarea>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Kode Barang <span class="text-red-500">*</span></label>
+                        <input type="text" name="kodebarang" placeholder="Contoh: KB001" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500" required>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">Harga</label>
-                        <input type="number" name="harga" step="0.01" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500">
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Nama Barang <span class="text-red-500">*</span></label>
+                        <input type="text" name="nama_barang" placeholder="Nama barang" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500" required>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">Satuan</label>
-                        <select name="satuan" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500">
-                            <option value="">Pilih Satuan</option>
-                            <option value="pcs">pcs</option>
-                            <option value="unit">unit</option>
-                            <option value="buah">buah</option>
-                            <option value="set">set</option>
-                            <option value="box">box</option>
-                            <option value="pack">pack</option>
-                            <option value="roll">roll</option>
-                            <option value="meter">meter</option>
-                            <option value="kg">kg</option>
-                            <option value="liter">liter</option>
-                        </select>
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">Kode Project</label>
-                        <input type="text" name="kodeproject" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500">
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">Kategori</label>
-                        <select name="idkategori" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500">
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Kategori <span class="text-red-500">*</span></label>
+                        <select name="idkategori" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500" required>
                             <option value="">Pilih Kategori</option>
                             <?php 
-                            // Fetch categories
                             $stmt = $pdo->query("SELECT idkategori, nama_kategori FROM kategoribarang ORDER BY nama_kategori");
                             $categories = $stmt->fetchAll(PDO::FETCH_ASSOC);
                             foreach ($categories as $category): ?>
@@ -1509,6 +1937,30 @@ $title = 'Inventory';
                             </option>
                             <?php endforeach; ?>
                         </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Lokasi</label>
+                        <input type="text" name="lokasi" placeholder="Contoh: Gudang A" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Kode Project</label>
+                        <input type="text" name="kodeproject" placeholder="Contoh: PROJ-001" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Harga <span class="text-red-500">*</span></label>
+                        <input type="number" name="harga" step="0.01" min="0" placeholder="0" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500" required>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Stok Awal <span class="text-red-500">*</span></label>
+                        <input type="number" name="stok_awal" min="0" placeholder="0" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500" required>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Stok Akhir <span class="text-red-500">*</span></label>
+                        <input type="number" name="stok_akhir" min="0" placeholder="0" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500" required>
+                    </div>
+                    <div class="md:col-span-2">
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Keterangan</label>
+                        <textarea name="keterangan" rows="3" placeholder="Keterangan tambahan..." class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"></textarea>
                     </div>
                 </div>
                 <div class="flex justify-end space-x-3">
@@ -1535,7 +1987,7 @@ $title = 'Inventory';
                 </button>
             </div>
             <form id="editItemForm" method="POST" action="">
-                <input type="hidden" name="edit_item" value="1">
+                <input type="hidden" name="edit_item_inventory" value="1">
                 <input type="hidden" name="idbarang" id="edit_idbarang">
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
                     <div>
@@ -1601,6 +2053,186 @@ $title = 'Inventory';
                     <button type="submit" class="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500">
                         Update
                     </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- ADD BARANG MASUK MODAL (TAB IN) -->
+<div id="addInModal" class="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50 hidden">
+    <div class="relative top-20 mx-auto p-5 border w-11/12 max-w-2xl shadow-lg rounded-md bg-white">
+        <div class="mt-3">
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="text-lg font-medium text-gray-900">Add Barang Masuk</h3>
+                <button onclick="closeModal('addInModal')" class="text-gray-400 bg-transparent hover:bg-gray-200 hover:text-gray-900 rounded-lg text-sm p-1.5 ml-auto inline-flex items-center">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <form method="POST" action="">
+                <input type="hidden" name="add_item_in" value="1">
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Tanggal Masuk</label>
+                        <input type="date" name="tgl_masuk" value="<?= date('Y-m-d') ?>" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500" required>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">ID Barang</label>
+                        <input type="text" name="idbarang" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500" required>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Jumlah</label>
+                        <input type="number" name="jumlah" min="1" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500" required>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">ID Purchase Order (Optional)</label>
+                        <select name="idpurchaseorder" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500">
+                            <option value="">-- Tanpa PO --</option>
+                            <?php 
+                            // Fetch all valid purchase orders
+                            $poStmt = $pdo->query("SELECT idpurchaseorder, supplier, tgl_po FROM purchaseorder ORDER BY tgl_po DESC");
+                            while ($po = $poStmt->fetch(PDO::FETCH_ASSOC)): 
+                            ?>
+                            <option value="<?= htmlspecialchars($po['idpurchaseorder']) ?>">
+                                <?= htmlspecialchars($po['idpurchaseorder']) ?> - <?= htmlspecialchars($po['supplier']) ?> (<?= htmlspecialchars($po['tgl_po']) ?>)
+                            </option>
+                            <?php endwhile; ?>
+                        </select>
+                    </div>
+                </div>
+                <div class="flex justify-end gap-2">
+                    <button type="button" onclick="closeModal('addInModal')" class="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-200 rounded-md hover:bg-gray-300">Batal</button>
+                    <button type="submit" class="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700">Simpan</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- EDIT BARANG MASUK MODAL -->
+<div id="editInModal" class="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50 hidden">
+    <div class="relative top-20 mx-auto p-5 border w-11/12 max-w-2xl shadow-lg rounded-md bg-white">
+        <div class="mt-3">
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="text-lg font-medium text-gray-900">Edit Barang Masuk</h3>
+                <button onclick="closeModal('editInModal')" class="text-gray-400 bg-transparent hover:bg-gray-200 hover:text-gray-900 rounded-lg text-sm p-1.5 ml-auto inline-flex items-center">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <form method="POST" action="">
+                <input type="hidden" name="edit_item_in" value="1">
+                <input type="hidden" name="idmasuk" id="edit_in_idmasuk">
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Tanggal Masuk</label>
+                        <input type="date" name="tgl_masuk" id="edit_in_tgl_masuk" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500" required>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">ID Barang</label>
+                        <input type="text" name="idbarang" id="edit_in_idbarang" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500" required>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Jumlah</label>
+                        <input type="number" name="jumlah" id="edit_in_jumlah" min="1" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500" required>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">ID Purchase Order (Optional)</label>
+                        <select name="idpurchaseorder" id="edit_in_idpurchaseorder" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500">
+                            <option value="">-- Tanpa PO --</option>
+                            <?php 
+                            // Fetch all valid purchase orders
+                            $poStmt2 = $pdo->query("SELECT idpurchaseorder, supplier, tgl_po FROM purchaseorder ORDER BY tgl_po DESC");
+                            while ($po2 = $poStmt2->fetch(PDO::FETCH_ASSOC)): 
+                            ?>
+                            <option value="<?= htmlspecialchars($po2['idpurchaseorder']) ?>">
+                                <?= htmlspecialchars($po2['idpurchaseorder']) ?> - <?= htmlspecialchars($po2['supplier']) ?> (<?= htmlspecialchars($po2['tgl_po']) ?>)
+                            </option>
+                            <?php endwhile; ?>
+                        </select>
+                    </div>
+                </div>
+                <div class="flex justify-end gap-2">
+                    <button type="button" onclick="closeModal('editInModal')" class="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-200 rounded-md hover:bg-gray-300">Batal</button>
+                    <button type="submit" class="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700">Update</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- ADD BARANG KELUAR MODAL (TAB OUT) -->
+<div id="addOutModal" class="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50 hidden">
+    <div class="relative top-20 mx-auto p-5 border w-11/12 max-w-2xl shadow-lg rounded-md bg-white">
+        <div class="mt-3">
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="text-lg font-medium text-gray-900">Add Barang Keluar</h3>
+                <button onclick="closeModal('addOutModal')" class="text-gray-400 bg-transparent hover:bg-gray-200 hover:text-gray-900 rounded-lg text-sm p-1.5 ml-auto inline-flex items-center">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <form method="POST" action="">
+                <input type="hidden" name="add_item_out" value="1">
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Tanggal Keluar</label>
+                        <input type="date" name="tgl_keluar" value="<?= date('Y-m-d') ?>" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500" required>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">ID Barang</label>
+                        <input type="text" name="idbarang" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500" required>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Jumlah</label>
+                        <input type="number" name="jumlah" min="1" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500" required>
+                    </div>
+                    <div class="md:col-span-2">
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Keterangan</label>
+                        <textarea name="keterangan" rows="3" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"></textarea>
+                    </div>
+                </div>
+                <div class="flex justify-end gap-2">
+                    <button type="button" onclick="closeModal('addOutModal')" class="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-200 rounded-md hover:bg-gray-300">Batal</button>
+                    <button type="submit" class="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700">Simpan</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- EDIT BARANG KELUAR MODAL -->
+<div id="editOutModal" class="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50 hidden">
+    <div class="relative top-20 mx-auto p-5 border w-11/12 max-w-2xl shadow-lg rounded-md bg-white">
+        <div class="mt-3">
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="text-lg font-medium text-gray-900">Edit Barang Keluar</h3>
+                <button onclick="closeModal('editOutModal')" class="text-gray-400 bg-transparent hover:bg-gray-200 hover:text-gray-900 rounded-lg text-sm p-1.5 ml-auto inline-flex items-center">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <form method="POST" action="">
+                <input type="hidden" name="edit_item_out" value="1">
+                <input type="hidden" name="idkeluar" id="edit_out_idkeluar">
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Tanggal Keluar</label>
+                        <input type="date" name="tgl_keluar" id="edit_out_tgl_keluar" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500" required>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">ID Barang</label>
+                        <input type="text" name="idbarang" id="edit_out_idbarang" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500" required>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Jumlah</label>
+                        <input type="number" name="jumlah" id="edit_out_jumlah" min="1" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500" required>
+                    </div>
+                    <div class="md:col-span-2">
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Keterangan</label>
+                        <textarea name="keterangan" id="edit_out_keterangan" rows="3" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"></textarea>
+                    </div>
+                </div>
+                <div class="flex justify-end gap-2">
+                    <button type="button" onclick="closeModal('editOutModal')" class="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-200 rounded-md hover:bg-gray-300">Batal</button>
+                    <button type="submit" class="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700">Update</button>
                 </div>
             </form>
         </div>

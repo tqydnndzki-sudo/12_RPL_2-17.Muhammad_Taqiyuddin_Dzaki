@@ -15,32 +15,33 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && !empty($_POST['idrequest'])) {
     $idrequest = trim($_POST['idrequest']);
 
     // Ambil data purchase request dengan status terakhir dari logstatusreq
-    $stmt = $pdo->prepare("
-        SELECT 
-            pr.*, 
-            u.nama AS nama_supervisor,
-            ls.status AS status_code,
-            CASE ls.status
-                WHEN 1 THEN 'Process Approval Leader'
-                WHEN 2 THEN 'Process Approval Manager'
-                WHEN 3 THEN 'Approved'
-                WHEN 4 THEN 'Hold'
-                WHEN 5 THEN 'Reject'
-                WHEN 6 THEN 'Done'
-                ELSE 'Pending'
-            END AS status_request,
-            ls.date AS tanggal_status,
-            ls.note_reject
-        FROM purchaserequest pr
-        LEFT JOIN users u ON pr.idsupervisor = u.iduser
-        LEFT JOIN LATERAL (
-            SELECT status, date, note_reject
-            FROM logstatusreq 
-            WHERE idrequest = pr.idrequest
-            ORDER BY date DESC 
-            LIMIT 1
-        ) ls ON TRUE
-        WHERE pr.idrequest = ?
+    $stmt = $pdo->prepare("SELECT 
+        pr.*, 
+        u.nama AS nama_supervisor,
+        ls.status AS status_code,
+        CASE ls.status
+            WHEN 1 THEN 'Process Approval Leader'
+            WHEN 2 THEN 'Process Approval Manager'
+            WHEN 3 THEN 'Approved'
+            WHEN 4 THEN 'Hold'
+            WHEN 5 THEN 'Reject'
+            WHEN 6 THEN 'Done'
+            ELSE 'Pending'
+        END AS status_request,
+        ls.date AS tanggal_status,
+        ls.note_reject
+    FROM purchaserequest pr
+    LEFT JOIN users u ON pr.idsupervisor = u.iduser
+    LEFT JOIN (
+        SELECT idrequest, status, date, note_reject
+        FROM logstatusreq l1
+        WHERE l1.date = (
+            SELECT MAX(l2.date)
+            FROM logstatusreq l2
+            WHERE l2.idrequest = l1.idrequest
+        )
+    ) ls ON pr.idrequest = ls.idrequest
+    WHERE pr.idrequest = ?
     ");
 
     $stmt->execute([$idrequest]);
@@ -58,53 +59,60 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && !empty($_POST['idrequest'])) {
         $detailItems = $stmtDetail->fetchAll(PDO::FETCH_ASSOC);
 
         // Ambil data purchase order terkait dengan status dari logstatusorder
-        $stmtOrder = $pdo->prepare("
-            SELECT 
-                po.*,
-                dr.namaitem,
-                dr.qty as qty_request,
-                dr.harga,
-                dr.total,
-                dr.kodeproject,
-                mb.kodebarang,
-                los.status AS status_code,
-                CASE los.status
-                    WHEN 1 THEN 'Process Order'
-                    WHEN 2 THEN 'Process Payment'
-                    WHEN 3 THEN 'Process Delivery'
-                    WHEN 4 THEN 'Arrived'
-                    ELSE 'Pending'
-                END AS status_po,
-                los.date AS tanggal_status_order,
-                los.keterangan
-            FROM purchaseorder po
-            LEFT JOIN detailrequest dr ON po.idrequest = dr.idrequest
-            LEFT JOIN m_barang mb ON dr.idbarang = mb.idbarang
-            LEFT JOIN LATERAL (
-                SELECT status, date, keterangan
-                FROM logstatusorder
-                WHERE idpurchaseorder = po.idpurchaseorder
-                ORDER BY date DESC
-                LIMIT 1
-            ) los ON TRUE
-            WHERE po.idrequest = ?
-        ");
-        $stmtOrder->execute([$idrequest]);
-        $orderItems = $stmtOrder->fetchAll(PDO::FETCH_ASSOC);
-
+$stmtOrder = $pdo->prepare("
+    SELECT 
+        po.idpurchaseorder,
+        po.tgl_po,
+        po.supplier,
+        dr.namaitem,
+        dr.qty as qty_request,
+        dr.harga,
+        dr.total,
+        dr.kodeproject,
+        mb.kodebarang,
+        COALESCE(los.status_code, 0) AS status_code,
+        COALESCE(los.status_po, 'Pending') AS status_po,
+        los.tanggal_status_order,
+        los.keterangan
+    FROM purchaseorder po
+    INNER JOIN detailrequest dr ON po.idrequest = dr.idrequest
+    LEFT JOIN m_barang mb ON dr.idbarang = mb.idbarang
+    LEFT JOIN (
+        SELECT 
+            idpurchaseorder,
+            status AS status_code,
+            status AS status_po,
+            date AS tanggal_status_order,
+            keterangan
+        FROM logstatusorder l1
+        WHERE l1.date = (
+            SELECT MAX(l2.date)
+            FROM logstatusorder l2
+            WHERE l2.idpurchaseorder = l1.idpurchaseorder
+        )
+    ) los ON po.idpurchaseorder = los.idpurchaseorder
+    WHERE po.idrequest = ?
+    ORDER BY po.tgl_po DESC, dr.iddetailrequest ASC
+");
+$stmtOrder->execute([$idrequest]);
+$orderItems = $stmtOrder->fetchAll(PDO::FETCH_ASSOC);
         // Hitung completion percentage berdasarkan logstatusbarang
         $stmtCompletion = $pdo->prepare("
             SELECT 
                 COUNT(*) as total_items,
                 COUNT(CASE WHEN lsb.status = 4 THEN 1 END) as items_arrived
             FROM detailrequest dr
-            LEFT JOIN LATERAL (
-                SELECT status
-                FROM logstatusbarang
-                WHERE iddetailrequest = dr.iddetailrequest
-                ORDER BY date DESC
-                LIMIT 1
-            ) lsb ON TRUE
+            LEFT JOIN (
+                SELECT 
+                    iddetailrequest,
+                    status
+                FROM logstatusbarang l1
+                WHERE l1.date = (
+                    SELECT MAX(l2.date)
+                    FROM logstatusbarang l2
+                    WHERE l2.iddetailrequest = l1.iddetailrequest
+                )
+            ) lsb ON dr.iddetailrequest = lsb.iddetailrequest
             WHERE dr.idrequest = ?
         ");
         $stmtCompletion->execute([$idrequest]);
@@ -314,7 +322,9 @@ function getStatusDescription($status) {
                 <table class="w-full">
                     <thead class="bg-gray-100">
                         <tr>
-                            <th class="px-4 py-3 text-left text-sm font-semibold">No PO</th>
+                            <th class="px-4 py-3 text-left text-sm font-semibold">ID Purchase Order</th>
+                            <th class="px-4 py-3 text-left text-sm font-semibold">Tanggal PO</th>
+                            <th class="px-4 py-3 text-left text-sm font-semibold">Supplier</th>
                             <th class="px-4 py-3 text-left text-sm font-semibold">Kode Barang</th>
                             <th class="px-4 py-3 text-left text-sm font-semibold">Kode Project</th>
                             <th class="px-4 py-3 text-left text-sm font-semibold">Nama Barang</th>
@@ -322,14 +332,15 @@ function getStatusDescription($status) {
                             <th class="px-4 py-3 text-left text-sm font-semibold">Qty</th>
                             <th class="px-4 py-3 text-left text-sm font-semibold">Total</th>
                             <th class="px-4 py-3 text-left text-sm font-semibold">Status PO</th>
-                            <th class="px-4 py-3 text-left text-sm font-semibold">Keterangan</th>
                         </tr>
                     </thead>
                     <tbody class="divide-y">
                         <?php if (!empty($orderItems)): ?>
                             <?php foreach ($orderItems as $order): ?>
                             <tr class="hover:bg-gray-50">
-                                <td class="px-4 py-3 text-sm font-semibold"><?= htmlspecialchars($order['nopo'] ?? '-') ?></td>
+                                <td class="px-4 py-3 text-sm font-semibold"><?= htmlspecialchars($order['idpurchaseorder'] ?? '-') ?></td>
+                                <td class="px-4 py-3 text-sm"><?= htmlspecialchars($order['tgl_po'] ?? '-') ?></td>
+                                <td class="px-4 py-3 text-sm"><?= htmlspecialchars($order['supplier'] ?? '-') ?></td>
                                 <td class="px-4 py-3 text-sm"><?= htmlspecialchars($order['kodebarang'] ?? '-') ?></td>
                                 <td class="px-4 py-3 text-sm"><?= htmlspecialchars($order['kodeproject'] ?? '-') ?></td>
                                 <td class="px-4 py-3 text-sm"><?= htmlspecialchars($order['namaitem'] ?? '-') ?></td>
@@ -341,12 +352,11 @@ function getStatusDescription($status) {
                                         <?= htmlspecialchars($order['status_po'] ?? 'Pending') ?>
                                     </span>
                                 </td>
-                                <td class="px-4 py-3 text-sm text-gray-600"><?= htmlspecialchars($order['keterangan'] ?? '-') ?></td>
                             </tr>
                             <?php endforeach; ?>
                         <?php else: ?>
                             <tr>
-                                <td colspan="9" class="px-4 py-8 text-center text-gray-500">Belum ada Purchase Order terkait</td>
+                                <td colspan="10" class="px-4 py-8 text-center text-gray-500">Belum ada Purchase Order terkait</td>
                             </tr>
                         <?php endif; ?>
                     </tbody>
@@ -379,46 +389,116 @@ function toggleInfo() {
 // Chart.js Donut Chart
 <?php if ($trackingData): ?>
 const ctx = document.getElementById('completionChart').getContext('2d');
-const completionChart = new Chart(ctx, {
-    type: 'doughnut',
-    data: {
-        labels: ['Completed', 'Remaining'],
-        datasets: [{
-            data: [<?= $completionPercentage ?>, <?= 100 - $completionPercentage ?>],
-            backgroundColor: ['#10b981', '#e5e7eb'],
-            borderWidth: 0
-        }]
-    },
-    options: {
-        responsive: true,
-        maintainAspectRatio: true,
-        cutout: '70%',
-        plugins: {
-            legend: {
-                display: false
-            },
-            tooltip: {
-                enabled: true
+
+// Always show PO status chart when there are order items, otherwise show completion chart
+<?php if (!empty($orderItems)): ?>
+    // Count PO status distribution
+    const statusCounts = {};
+    <?php foreach ($orderItems as $order): ?>
+        const status = "<?= $order['status_po'] ?? 'Pending' ?>";
+        if (statusCounts[status]) {
+            statusCounts[status]++;
+        } else {
+            statusCounts[status] = 1;
+        }
+    <?php endforeach; ?>
+
+    // Prepare data for PO status chart
+    const statusLabels = Object.keys(statusCounts);
+    const statusData = Object.values(statusCounts);
+    const statusColors = {
+        'Process Order': '#f59e0b',
+        'Process Payment': '#3b82f6',
+        'Process Delivery': '#8b5cf6',
+        'Arrived': '#10b981',
+        'Pending': '#9ca3af'
+    };
+    const backgroundColors = statusLabels.map(label => statusColors[label] || '#6b7280');
+
+    const completionChart = new Chart(ctx, {
+        type: 'doughnut',
+        data: {
+            labels: statusLabels,
+            datasets: [{
+                data: statusData,
+                backgroundColor: backgroundColors,
+                borderWidth: 0
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: true,
+            cutout: '70%',
+            plugins: {
+                legend: {
+                    position: 'bottom'
+                },
+                tooltip: {
+                    enabled: true
+                }
             }
-        }
-    },
-    plugins: [{
-        beforeDraw: function(chart) {
-            const width = chart.width;
-            const height = chart.height;
-            const ctx = chart.ctx;
-            ctx.restore();
-            const fontSize = (height / 114).toFixed(2);
-            ctx.font = fontSize + "em sans-serif";
-            ctx.textBaseline = "middle";
-            const text = "<?= $completionPercentage ?>%";
-            const textX = Math.round((width - ctx.measureText(text).width) / 2);
-            const textY = height / 2;
-            ctx.fillText(text, textX, textY);
-            ctx.save();
-        }
-    }]
-});
+        },
+        plugins: [{
+            beforeDraw: function(chart) {
+                const width = chart.width;
+                const height = chart.height;
+                const ctx = chart.ctx;
+                ctx.restore();
+                const fontSize = (height / 114).toFixed(2);
+                ctx.font = fontSize + "em sans-serif";
+                ctx.textBaseline = "middle";
+                const total = statusData.reduce((a, b) => a + b, 0);
+                const text = total + " PO";
+                const textX = Math.round((width - ctx.measureText(text).width) / 2);
+                const textY = height / 2;
+                ctx.fillText(text, textX, textY);
+                ctx.save();
+            }
+        }]
+    });
+<?php else: ?>
+    // Original completion chart when no order items
+    const completionChart = new Chart(ctx, {
+        type: 'doughnut',
+        data: {
+            labels: ['Completed', 'Remaining'],
+            datasets: [{
+                data: [<?= $completionPercentage ?>, <?= 100 - $completionPercentage ?>],
+                backgroundColor: ['#10b981', '#e5e7eb'],
+                borderWidth: 0
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: true,
+            cutout: '70%',
+            plugins: {
+                legend: {
+                    display: false
+                },
+                tooltip: {
+                    enabled: true
+                }
+            }
+        },
+        plugins: [{
+            beforeDraw: function(chart) {
+                const width = chart.width;
+                const height = chart.height;
+                const ctx = chart.ctx;
+                ctx.restore();
+                const fontSize = (height / 114).toFixed(2);
+                ctx.font = fontSize + "em sans-serif";
+                ctx.textBaseline = "middle";
+                const text = "<?= $completionPercentage ?>%";
+                const textX = Math.round((width - ctx.measureText(text).width) / 2);
+                const textY = height / 2;
+                ctx.fillText(text, textX, textY);
+                ctx.save();
+            }
+        }]
+    });
+<?php endif; ?>
 <?php endif; ?>
 </script>
 

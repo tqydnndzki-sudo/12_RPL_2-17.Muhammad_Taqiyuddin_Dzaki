@@ -68,10 +68,10 @@ class Auth {
         
         // Definisikan permissions berdasarkan role
         $permissions = [
-            'Admin' => ['view_inventory', 'manage_inventory', 'view_procurement', 'manage_procurement'],
+            'Admin' => ['view_inventory', 'manage_inventory', 'view_procurement', 'manage_procurement', 'manage_users'],
             'Inventory' => ['view_inventory', 'manage_inventory'],
             'Procurement' => ['view_procurement', 'manage_procurement'],
-            'Manager' => ['view_inventory', 'view_procurement'],
+            'Manager' => ['view_inventory', 'view_procurement', 'manage_procurement'],
             'Leader' => ['view_inventory', 'view_procurement']
         ];
         
@@ -89,6 +89,29 @@ class Auth {
             header('Location: /index.php');
             exit;
         }
+    }
+    
+    // Metode untuk mengecek leader type
+    public function getLeaderType() {
+        if (!isset($_SESSION['user_id'])) {
+            return null;
+        }
+        
+        // Use $this->pdo instead of global $pdo
+        $stmt = $this->pdo->prepare("SELECT leader_type FROM users WHERE iduser = ?");
+        $stmt->execute([$_SESSION['user_id']]);
+        $result = $stmt->fetch(PDO::FETCH_ASSOC);
+        
+        return $result ? $result['leader_type'] : null;
+    }
+    
+    // Metode untuk mengecek apakah user adalah leader dengan type tertentu
+    public function isLeaderType($type) {
+        if (($this->isLoggedIn()) && ($_SESSION['role'] === 'Leader')) {
+            $leaderType = $this->getLeaderType();
+            return $leaderType === $type;
+        }
+        return false;
     }
 }
 

@@ -9,11 +9,12 @@ require_once 'includes/auth.php';
 
 // Jika sudah login, arahkan ke dashboard
 if ($auth->isLoggedIn()) {
-    header('Location: /inventory.php');
+    header('Location: pages/inventory.php');
     exit;
 }
 
 $error = '';
+$staff_error = false; // Flag untuk staff access denial
 
 // Jika form disubmit
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -28,12 +29,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         // Proses login
         if ($auth->login($username, $password)) {
-
-            // Redirect ke halaman inventory setelah login
-            $redirect = 'pages/inventory.php';
-
-            header("Location: $redirect");
-            exit;
+            
+            // Cek role user - Staff tidak boleh login ke dashboard
+            $stmt = $pdo->prepare("SELECT roletype FROM users WHERE username = ?");
+            $stmt->execute([$username]);
+            $userData = $stmt->fetch(PDO::FETCH_ASSOC);
+            
+            if ($userData && $userData['roletype'] === 'Staff') {
+                // Staff tidak boleh login ke dashboard
+                $auth->logout();
+                $staff_error = true; // Set flag untuk staff error khusus
+            } else {
+                // Redirect ke halaman inventory setelah login (untuk non-Staff)
+                $redirect = 'pages/inventory.php';
+                header("Location: $redirect");
+                exit;
+            }
 
         } else {
             $error = 'Username atau password salah';
@@ -201,6 +212,51 @@ body{
     color:#003d66;
 }
 
+.alert-staff {
+    background: #fff3cd;
+    border-left: 5px solid #ffc107;
+    padding: 20px;
+    margin: 20px 0;
+    border-radius: 4px;
+}
+
+.alert-staff h3 {
+    margin: 0 0 15px 0;
+    color: #856404;
+    font-size: 18px;
+    font-weight: 600;
+}
+
+.alert-staff p {
+    margin: 10px 0;
+    color: #856404;
+    line-height: 1.6;
+}
+
+.alert-staff-buttons {
+    display: flex;
+    gap: 10px;
+    margin-top: 20px;
+    flex-wrap: wrap;
+}
+
+.btn-staff {
+    padding: 12px 24px;
+    background: #E5A500;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: 500;
+    text-decoration: none;
+    display: inline-block;
+    transition: background 0.3s;
+}
+
+.btn-staff:hover {
+    background: #c98d00;
+}
+
 /* ============================
         RESPONSIVE
 ===============================*/
@@ -243,6 +299,27 @@ body{
             <div class="alert alert-info"><?= htmlspecialchars($_GET['message']) ?></div>
         <?php endif; ?>
 
+        <?php if($staff_error): ?>
+            <div class="alert alert-staff">
+                <h3>Access Denied - Staff Role</h3>
+                <p>Maaf, role "Staff" tidak dapat login ke dashboard system.</p>
+                <p><strong>Hak Akses Staff:</strong></p>
+                <ul>
+                    <li>Mengajukan Purchase Request (PR)</li>
+                    <li>Melacak status Purchase Request</li>
+                </ul>
+                <p>Silakan gunakan tombol di bawah untuk mengakses form Purchase Request. Anda harus terdaftar sebagai user di database untuk dapat mengajukan PR.</p>
+                <div class="alert-staff-buttons">
+                    <button type="button" class="btn-staff" onclick="window.location.href='pages/purchase-request.php'">
+                        Form Purchase Request
+                    </button>
+                    <button type="button" class="btn-staff" onclick="window.location.href='pages/tracking.php'">
+                        Lacak Purchase Request
+                    </button>
+                </div>
+            </div>
+        <?php endif; ?>
+
         <!-- FORM LOGIN -->
         <form method="POST">
 
@@ -257,13 +334,13 @@ body{
             </div>
 
             <!-- BUTTON FORM PR -->
-            <button type="button" class="btn-yellow" onclick="window.location.href='/pages/purchase-request.php'">
-    Form Purchase Request
-</button>
+            <button type="button" class="btn-yellow" onclick="window.location.href='pages/purchase-request.php'">
+                Form Purchase Request
+            </button>
 
-<button type="button" class="btn-yellow" onclick="window.location.href='/pages/tracking.php'">
-    Lacak Purchase Request
-</button>
+            <button type="button" class="btn-yellow" onclick="window.location.href='pages/tracking.php'">
+                Lacak Purchase Request
+            </button>
 
 
             <!-- LOGIN BUTTON -->

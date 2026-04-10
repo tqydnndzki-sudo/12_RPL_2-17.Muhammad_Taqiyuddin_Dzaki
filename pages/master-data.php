@@ -81,7 +81,11 @@ if (isset($_GET['month']) && $_GET['month'] !== '' && $_GET['month'] !== '0' && 
 
 $search = $_GET['search'] ?? '';
 $page = isset($_GET['page']) ? (int)$_GET['page'] : 1;
-$limit = 25;
+$limit = isset($_GET['limit']) ? (int)$_GET['limit'] : 25;
+// Ensure limit is one of the allowed values
+if (!in_array($limit, [10, 25, 50, 100])) {
+    $limit = 25;
+}
 $offset = ($page - 1) * $limit;
 
 // Initialize items array and total pages
@@ -245,9 +249,10 @@ $title = 'Master Data';
                 <!-- BARANG TAB -->
                 <?php if ($activeTab == 'barang'): ?>
                 <div>
-                    <!-- Toolbar -->
-                    <div class="flex justify-between items-center mb-6">
+                    <!-- Action Buttons Row -->
+                    <div class="flex justify-start items-center mb-4">
                         <div class="flex gap-2">
+                            <?php if ($_SESSION['role'] === 'Admin' || $_SESSION['role'] === 'Procurement' || $_SESSION['role'] === 'Leader' || $_SESSION['role'] === 'Manager'): ?>
                             <button onclick="showAddBarangForm()" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center gap-2">
                                 <i class="fas fa-plus"></i>
                                 Add
@@ -256,61 +261,54 @@ $title = 'Master Data';
                                 <i class="fas fa-edit"></i>
                                 Edit
                             </button>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                    
+                    <!-- Toolbar with Entries and Search -->
+                    <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 gap-4">
+                        <div class="flex flex-wrap items-center gap-4">
+                            <!-- Entries Dropdown -->
+                            <div class="flex items-center gap-2">
+                                <label class="text-sm text-gray-700 font-medium">Show</label>
+                                <select id="entries-master" onchange="changeEntries('master')" class="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+                                    <option value="10" <?= $limit == 10 ? 'selected' : '' ?>>10</option>
+                                    <option value="25" <?= $limit == 25 ? 'selected' : '' ?>>25</option>
+                                    <option value="50" <?= $limit == 50 ? 'selected' : '' ?>>50</option>
+                                    <option value="100" <?= $limit == 100 ? 'selected' : '' ?>>100</option>
+                                </select>
+                                <span class="text-sm text-gray-700">entries</span>
+                            </div>
                         </div>
                         
-                        <div class="flex gap-4 items-center">
+                        <div class="flex flex-wrap items-center gap-4">
+                            <!-- Search Input -->
                             <div class="relative">
-                                <input type="text" id="search-<?= $activeTab ?>" placeholder="Search..." class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-64" onkeyup="handleSearch(event)">
-                                <button onclick="performSearch()" class="absolute right-3 top-2.5 text-gray-400 hover:text-gray-600">
-                                    <i class="fas fa-search"></i>
+                                <input type="text" id="search-master" placeholder="Search..." onkeyup="searchTable('master')" class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-64">
+                                <button onclick="clearSearch('master')" class="absolute right-3 top-2.5 text-gray-400 hover:text-gray-600">
+                                    <i class="fas fa-times"></i>
                                 </button>
                             </div>
-                            
-                            <div>
-                                <select onchange="filterData()" id="filter-month-<?= $activeTab ?>" class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-32">
-                                    <option value="0" <?= $selectedMonth == 0 ? 'selected' : '' ?>>All Months</option>
-                                    <?php for($m = 1; $m <= 12; $m++): ?>
-                                    <option value="<?= $m ?>" <?= $selectedMonth == $m ? 'selected' : '' ?>><?= date('F', mktime(0, 0, 0, $m, 1)) ?></option>
-                                    <?php endfor; ?>
-                                </select>
-                            </div>
-                            
-                            <div>
-                                <select onchange="filterData()" id="filter-year-<?= $activeTab ?>" class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-32">
-                                    <option value="0" <?= $selectedYear == 0 ? 'selected' : '' ?>>All Years</option>
-                                    <?php for($y = date('Y'); $y >= 2020; $y--): ?>
-                                    <option value="<?= $y ?>" <?= $selectedYear == $y ? 'selected' : '' ?>><?= $y ?></option>
-                                    <?php endfor; ?>
-                                </select>
-                            </div>
-                            
-                            <button onclick="downloadReport()" class="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 flex items-center gap-2">
-                                <i class="fas fa-download"></i>
-                                Download
-                            </button>
                         </div>
                     </div>
 
                     <!-- Table -->
-                    <div class="overflow-x-auto">
-                        <table class="min-w-full divide-y divide-gray-200">
-                            <thead class="bg-gray-50">
+                    <div class="overflow-x-auto rounded-lg border border-gray-200 shadow-sm table-container">
+                        <table id="master-table" class="min-w-full divide-y divide-gray-200">
+                            <thead class="bg-gradient-to-r from-blue-50 to-indigo-50">
                                 <tr>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" width="50">#</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID Barang</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Kode Barang</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Nama Barang</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Deskripsi</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Harga</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Satuan</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Kode Project</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Kategori</th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200 cursor-pointer hover:bg-blue-100 transition" onclick="sortTable('master', 0)" width="50">#<i class="fas fa-sort sort-arrow text-gray-400 ml-1"></i></th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200 cursor-pointer hover:bg-blue-100 transition" onclick="sortTable('master', 1)">Kode Barang<i class="fas fa-sort sort-arrow text-gray-400 ml-1"></i></th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200 cursor-pointer hover:bg-blue-100 transition" onclick="sortTable('master', 2)">Nama Barang<i class="fas fa-sort sort-arrow text-gray-400 ml-1"></i></th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200 cursor-pointer hover:bg-blue-100 transition" onclick="sortTable('master', 3)">Harga<i class="fas fa-sort sort-arrow text-gray-400 ml-1"></i></th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200 cursor-pointer hover:bg-blue-100 transition" onclick="sortTable('master', 4)">Satuan<i class="fas fa-sort sort-arrow text-gray-400 ml-1"></i></th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200 cursor-pointer hover:bg-blue-100 transition" onclick="sortTable('master', 5)">Kategori<i class="fas fa-sort sort-arrow text-gray-400 ml-1"></i></th>
                                 </tr>
                             </thead>
-                            <tbody class="bg-white divide-y divide-gray-200">
+                            <tbody class="bg-white divide-y divide-gray-100">
                                 <?php if (empty($items)): ?>
                                     <tr>
-                                        <td colspan="9" class="px-6 py-4 text-center text-gray-500">
+                                        <td colspan="6" class="px-6 py-4 text-center text-gray-500">
                                             Tidak ada data
                                         </td>
                                     </tr>
@@ -318,16 +316,21 @@ $title = 'Master Data';
                                     <?php 
                                     $row_number = $offset + 1;
                                     foreach ($items as $item): ?>
-                                    <tr class="hover:bg-gray-50 cursor-pointer" onclick="selectRow(this)">
+                                    <tr class="hover:bg-blue-50 transition-colors duration-150 cursor-pointer selectable-row" onclick="selectRow(this)">
                                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= $row_number++ ?></td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900"><strong><?= htmlspecialchars($item['idbarang'] ?? '-') ?></strong></td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= htmlspecialchars($item['kodebarang'] ?? '-') ?></td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= htmlspecialchars($item['nama_barang'] ?? '-') ?></td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= htmlspecialchars($item['deskripsi'] ?? '-') ?></td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= number_format($item['harga'] ?? 0, 2) ?></td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= htmlspecialchars($item['satuan'] ?? '-') ?></td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= htmlspecialchars($item['kodeproject'] ?? '-') ?></td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= htmlspecialchars($item['nama_kategori'] ?? '-') ?></td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900"><strong><?= htmlspecialchars($item['kodebarang'] ?? '-') ?></strong></td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700"><?= htmlspecialchars($item['nama_barang'] ?? '-') ?></td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900 font-medium">Rp <?= number_format($item['harga'] ?? 0, 0, ',', '.') ?></td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                            <span class="inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-medium bg-gray-100 text-gray-800">
+                                                <?= htmlspecialchars($item['satuan'] ?? '-') ?>
+                                            </span>
+                                        </td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                            <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                                                <?= htmlspecialchars($item['nama_kategori'] ?? '-') ?>
+                                            </span>
+                                        </td>
                                     </tr>
                                     <?php endforeach; ?>
                                 <?php endif; ?>
@@ -389,67 +392,75 @@ $title = 'Master Data';
                 <!-- KATEGORI TAB -->
                 <?php if ($activeTab == 'kategori'): ?>
                 <div>
-                    <!-- Toolbar -->
-                    <div class="flex justify-end items-center mb-6">
-                        <div class="flex gap-4 items-center">
+                    <!-- Action Buttons Row -->
+                    <div class="flex justify-start items-center mb-4">
+                        <div class="flex gap-2">
+                            <?php if ($_SESSION['role'] === 'Admin' || $_SESSION['role'] === 'Procurement' || $_SESSION['role'] === 'Leader' || $_SESSION['role'] === 'Manager'): ?>
+                            <button onclick="showAddForm()" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center gap-2">
+                                <i class="fas fa-plus"></i>
+                                Add
+                            </button>
+                            <button onclick="showEditForm()" class="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 flex items-center gap-2">
+                                <i class="fas fa-edit"></i>
+                                Edit
+                            </button>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                    
+                    <!-- Toolbar with Entries and Search -->
+                    <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 gap-4">
+                        <div class="flex flex-wrap items-center gap-4">
+                            <!-- Entries Dropdown -->
+                            <div class="flex items-center gap-2">
+                                <label class="text-sm text-gray-700 font-medium">Show</label>
+                                <select id="entries-kategori" onchange="changeEntries('kategori')" class="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+                                    <option value="10" <?= $limit == 10 ? 'selected' : '' ?>>10</option>
+                                    <option value="25" <?= $limit == 25 ? 'selected' : '' ?>>25</option>
+                                    <option value="50" <?= $limit == 50 ? 'selected' : '' ?>>50</option>
+                                    <option value="100" <?= $limit == 100 ? 'selected' : '' ?>>100</option>
+                                </select>
+                                <span class="text-sm text-gray-700">entries</span>
+                            </div>
+                        </div>
+                        
+                        <div class="flex flex-wrap items-center gap-4">
+                            <!-- Search Input -->
                             <div class="relative">
-                                <input type="text" id="search-<?= $activeTab ?>" placeholder="Search..." class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-64" onkeyup="handleSearch(event)">
-                                <button onclick="performSearch()" class="absolute right-3 top-2.5 text-gray-400 hover:text-gray-600">
-                                    <i class="fas fa-search"></i>
+                                <input type="text" id="search-kategori" placeholder="Search..." onkeyup="searchTable('kategori')" class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-64">
+                                <button onclick="clearSearch('kategori')" class="absolute right-3 top-2.5 text-gray-400 hover:text-gray-600">
+                                    <i class="fas fa-times"></i>
                                 </button>
                             </div>
-                            
-                            <div>
-                                <select onchange="filterData()" id="filter-month-<?= $activeTab ?>" class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-32">
-                                    <option value="0" <?= $selectedMonth == 0 ? 'selected' : '' ?>>All Months</option>
-                                    <?php for($m = 1; $m <= 12; $m++): ?>
-                                    <option value="<?= $m ?>" <?= $selectedMonth == $m ? 'selected' : '' ?>><?= date('F', mktime(0, 0, 0, $m, 1)) ?></option>
-                                    <?php endfor; ?>
-                                </select>
-                            </div>
-                            
-                            <div>
-                                <select onchange="filterData()" id="filter-year-<?= $activeTab ?>" class="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-32">
-                                    <option value="0" <?= $selectedYear == 0 ? 'selected' : '' ?>>All Years</option>
-                                    <?php for($y = date('Y'); $y >= 2020; $y--): ?>
-                                    <option value="<?= $y ?>" <?= $selectedYear == $y ? 'selected' : '' ?>><?= $y ?></option>
-                                    <?php endfor; ?>
-                                </select>
-                            </div>
-                            
-                            <button onclick="downloadReport()" class="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 flex items-center gap-2">
-                                <i class="fas fa-download"></i>
-                                Download
-                            </button>
                         </div>
                     </div>
 
                     <!-- Table -->
-                    <div class="overflow-x-auto">
-                        <table class="min-w-full divide-y divide-gray-200">
-                            <thead class="bg-gray-50">
+                    <div class="overflow-x-auto rounded-lg border border-gray-200 shadow-sm table-container">
+                        <table id="kategori-table" class="min-w-full divide-y divide-gray-200">
+                            <thead class="bg-gradient-to-r from-blue-50 to-indigo-50">
                                 <tr>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" width="50">#</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID Kategori</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Nama Kategori</th>
-                                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Keterangan</th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200 cursor-pointer hover:bg-blue-100 transition" onclick="sortTable('kategori', 0)" width="50">#<i class="fas fa-sort sort-arrow text-gray-400 ml-1"></i></th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200 cursor-pointer hover:bg-blue-100 transition" onclick="sortTable('kategori', 1)">ID Kategori<i class="fas fa-sort sort-arrow text-gray-400 ml-1"></i></th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200 cursor-pointer hover:bg-blue-100 transition" onclick="sortTable('kategori', 2)">Nama Kategori<i class="fas fa-sort sort-arrow text-gray-400 ml-1"></i></th>
+                                    <th scope="col" class="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider border-b border-gray-200 cursor-pointer hover:bg-blue-100 transition" onclick="sortTable('kategori', 3)">Keterangan<i class="fas fa-sort sort-arrow text-gray-400 ml-1"></i></th>
                                 </tr>
                             </thead>
-                            <tbody class="bg-white divide-y divide-gray-200">
+                            <tbody class="bg-white divide-y divide-gray-100">
                                 <?php if (empty($items)): ?>
                                     <tr>
                                         <td colspan="4" class="px-6 py-4 text-center text-gray-500">
-                                            Tidak ada data
+                                            No categories found
                                         </td>
                                     </tr>
                                 <?php else: ?>
                                     <?php 
                                     $row_number = $offset + 1;
                                     foreach ($items as $item): ?>
-                                    <tr class="hover:bg-gray-50">
+                                    <tr class="hover:bg-blue-50 transition-colors duration-150 cursor-pointer selectable-row" onclick="selectRow(this)">
                                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= $row_number++ ?></td>
                                         <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900"><strong><?= htmlspecialchars($item['idkategori'] ?? '-') ?></strong></td>
-                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= htmlspecialchars($item['nama_kategori'] ?? '-') ?></td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700"><?= htmlspecialchars($item['nama_kategori'] ?? '-') ?></td>
                                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><?= htmlspecialchars($item['keterangan'] ?? '-') ?></td>
                                     </tr>
                                     <?php endforeach; ?>
@@ -680,6 +691,157 @@ function selectRow(row) {
     
     // Add selection to clicked row
     row.classList.add('bg-blue-50');
+}
+
+// Client-side Table Features for Master Data
+let currentSort = { master: { column: -1, direction: 'asc' } };
+
+// Search table function
+function searchTable(tableType) {
+    const searchTerm = document.getElementById(`search-${tableType}`).value.toLowerCase();
+    filterAndDisplayTable(tableType, searchTerm);
+}
+
+// Clear search
+function clearSearch(tableType) {
+    document.getElementById(`search-${tableType}`).value = '';
+    filterAndDisplayTable(tableType, '');
+}
+
+// Combined filter and display
+function filterAndDisplayTable(tableType, searchTerm) {
+    const table = document.getElementById(`${tableType}-table`);
+    if (!table) return;
+    
+    const tbody = table.querySelector('tbody');
+    const rows = tbody.querySelectorAll('tr');
+    
+    let visibleCount = 0;
+    
+    rows.forEach((row, index) => {
+        const cells = row.querySelectorAll('td');
+        let rowText = '';
+        cells.forEach(cell => {
+            rowText += cell.textContent.toLowerCase() + ' ';
+        });
+        
+        // Check if row matches search
+        const matchesSearch = !searchTerm || rowText.includes(searchTerm);
+        
+        // Show/hide row
+        if (matchesSearch) {
+            row.style.display = '';
+            visibleCount++;
+        } else {
+            row.style.display = 'none';
+        }
+    });
+    
+    // Update info text
+    updateTableInfo(tableType, visibleCount);
+}
+
+// Update table info text
+function updateTableInfo(tableType, visibleCount) {
+    const table = document.getElementById(`${tableType}-table`);
+    if (!table) return;
+    
+    const tbody = table.querySelector('tbody');
+    const totalRows = tbody.querySelectorAll('tr').length;
+    
+    // Create or update info text
+    let infoDiv = document.getElementById(`info-${tableType}`);
+    if (!infoDiv) {
+        infoDiv = document.createElement('div');
+        infoDiv.id = `info-${tableType}`;
+        infoDiv.className = 'text-sm text-gray-700 mt-2';
+        table.parentElement.appendChild(infoDiv);
+    }
+    
+    infoDiv.textContent = `Showing ${visibleCount} of ${totalRows} entries`;
+}
+
+// Change entries per page - reload with new limit
+function changeEntries(tableType) {
+    const entries = parseInt(document.getElementById(`entries-${tableType}`).value);
+    
+    // Get current URL parameters
+    const urlParams = new URLSearchParams(window.location.search);
+    
+    // Update limit parameter
+    urlParams.set('limit', entries);
+    urlParams.set('page', '1'); // Reset to first page
+    
+    // Reload page with new parameters
+    window.location.search = urlParams.toString();
+}
+
+// Sort table by column
+function sortTable(tableType, columnIndex) {
+    const table = document.getElementById(`${tableType}-table`);
+    if (!table) return;
+    
+    const tbody = table.querySelector('tbody');
+    const rows = Array.from(tbody.querySelectorAll('tr'));
+    
+    // Toggle sort direction
+    if (currentSort[tableType].column === columnIndex) {
+        currentSort[tableType].direction = currentSort[tableType].direction === 'asc' ? 'desc' : 'asc';
+    } else {
+        currentSort[tableType].column = columnIndex;
+        currentSort[tableType].direction = 'asc';
+    }
+    
+    // Sort rows
+    rows.sort((a, b) => {
+        const aText = a.cells[columnIndex]?.textContent.trim() || '';
+        const bText = b.cells[columnIndex]?.textContent.trim() || '';
+        
+        // Try to parse as numbers (remove 'Rp' and commas)
+        const aNum = parseFloat(aText.replace(/[^0-9.-]/g, ''));
+        const bNum = parseFloat(bText.replace(/[^0-9.-]/g, ''));
+        
+        let comparison = 0;
+        if (!isNaN(aNum) && !isNaN(bNum)) {
+            comparison = aNum - bNum;
+        } else {
+            comparison = aText.localeCompare(bText);
+        }
+        
+        return currentSort[tableType].direction === 'asc' ? comparison : -comparison;
+    });
+    
+    // Re-append sorted rows
+    rows.forEach(row => tbody.appendChild(row));
+    
+    // Update sort indicators
+    updateSortIndicators(tableType, columnIndex);
+}
+
+// Update sort indicators in table header
+function updateSortIndicators(tableType, columnIndex) {
+    const table = document.getElementById(`${tableType}-table`);
+    if (!table) return;
+    
+    const headers = table.querySelectorAll('thead th');
+    headers.forEach((header, index) => {
+        // Remove existing arrows
+        const existingArrow = header.querySelector('.sort-arrow');
+        if (existingArrow) {
+            existingArrow.remove();
+        }
+        
+        // Add arrow to sorted column
+        if (index === columnIndex) {
+            const arrow = document.createElement('i');
+            arrow.className = `fas fa-sort-${currentSort[tableType].direction === 'asc' ? 'up' : 'down'} sort-arrow text-blue-600 ml-1`;
+            header.appendChild(arrow);
+        } else {
+            const arrow = document.createElement('i');
+            arrow.className = 'fas fa-sort sort-arrow text-gray-400 ml-1';
+            header.appendChild(arrow);
+        }
+    });
 }
 
 </script>

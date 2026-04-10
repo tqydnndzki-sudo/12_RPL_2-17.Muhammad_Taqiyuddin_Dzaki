@@ -23,6 +23,14 @@
                     <span>Master Data</span>
                 </a>
             </li>
+            <?php if ($auth->hasPermission('manage_users')): ?>
+            <li>
+                <a href="/pages/user-management.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'user-management.php' ? 'active' : ''; ?>">
+                    <i class="fas fa-users-cog"></i>
+                    <span>User Management</span>
+                </a>
+            </li>
+            <?php endif; ?>
         </ul>
     </div>
 </nav>

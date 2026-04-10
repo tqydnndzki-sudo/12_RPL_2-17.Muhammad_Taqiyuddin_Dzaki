@@ -1,31 +1,38 @@
 <?php
-require 'config/database.php';
+require_once 'config/database.php';
 
-try {
-    $pdo = new PDO("mysql:host=$DB_HOST;dbname=$DB_NAME;charset=utf8mb4", $DB_USER, $DB_PASS);
-    $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-    
-    $stmt = $pdo->prepare("DESCRIBE purchaseorder");
-    $stmt->execute();
-    $columns = $stmt->fetchAll(PDO::FETCH_ASSOC);
-    
-    echo "Struktur tabel purchaseorder:\n";
-    foreach($columns as $column) {
-        echo $column['Field'] . ' (' . $column['Type'] . ') ' . 
-             ($column['Null'] == 'NO' ? 'NOT NULL' : 'NULL') . ' ' . 
-             ($column['Key'] == 'PRI' ? 'PRIMARY KEY' : '') . ' ' . 
-             ($column['Extra'] ? $column['Extra'] : '') . "\n";
-    }
-    
-    echo "\nContoh data dari tabel purchaseorder:\n";
-    $stmt = $pdo->prepare("SELECT * FROM purchaseorder LIMIT 3");
-    $stmt->execute();
-    $orders = $stmt->fetchAll(PDO::FETCH_ASSOC);
-    
-    foreach($orders as $order) {
-        echo "ID: " . $order['idpurchaseorder'] . ", Request ID: " . $order['idrequest'] . ", Supplier: " . $order['supplier'] . ", Tanggal: " . $order['tgl_po'] . "\n";
-    }
-} catch(Exception $e) {
-    echo "Error: " . $e->getMessage();
+echo "=== STRUKTUR TABEL m_barang ===\n\n";
+
+$stmt = $pdo->query("DESCRIBE m_barang");
+while($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+    echo "Field: {$row['Field']}\n";
+    echo "Type: {$row['Type']}\n";
+    echo "Key: {$row['Key']}\n";
+    echo "Extra: {$row['Extra']}\n";
+    echo "Null: {$row['Null']}\n";
+    echo "---\n";
 }
-?>
+
+echo "\n\n=== DATA SAAT INI DI m_barang ===\n\n";
+
+$stmt = $pdo->query("SELECT * FROM m_barang ORDER BY idbarang");
+$barangList = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+if (empty($barangList)) {
+    echo "Tabel kosong!\n";
+} else {
+    foreach ($barangList as $barang) {
+        print_r($barang);
+        echo "---\n";
+    }
+}
+
+echo "\n\n=== CEK MAX ID ===\n\n";
+$maxId = $pdo->query("SELECT MAX(idbarang) as max_id FROM m_barang")->fetch();
+echo "MAX(idbarang): " . $maxId['max_id'] . "\n";
+
+echo "\n=== CEK ID YANG SUDAH ADA ===\n\n";
+$stmt = $pdo->query("SELECT idbarang FROM m_barang ORDER BY idbarang");
+$ids = $stmt->fetchAll(PDO::FETCH_COLUMN);
+echo "IDs: " . implode(', ', $ids) . "\n";
+echo "Next ID seharusnya: " . (max($ids) + 1) . "\n";

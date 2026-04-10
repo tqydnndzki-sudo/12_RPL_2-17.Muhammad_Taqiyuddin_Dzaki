@@ -1,0 +1,45 @@
+# Dependencies
+/vendor/
+composer.lock
+
+# Environment files
+.env
+.env.local
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Debug/Test files
+test_*.php
+check_*.php
+debug_*.php
+temp*.php
+*_test.php
+*_backup*.php
+*.bak
+
+# Documentation (optional - uncomment if you don't want to push docs)
+# *.md
+# QUICK_START.md
+# TESTING_GUIDE.md
+
+# Database backups (keep only the main SQL file)
+*.sql.bak
+dump*.sql
+
+# Temporary files
+*.tmp
+cache/
