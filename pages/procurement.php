@@ -1672,9 +1672,11 @@ $title = 'Procurement';
                                             </span>
                                         </td>
                                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                            <?php if ($_SESSION['role'] === 'Admin' || $_SESSION['role'] === 'Procurement'): ?>
                                             <a href="detail-order.php?id=<?= urlencode($item['idpurchaseorder']) ?>" class="inline-flex items-center px-3 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors duration-150 text-xs font-medium shadow-sm mr-2">
                                                 <i class="fas fa-eye mr-1.5"></i>Detail
                                             </a>
+                                            <?php endif; ?>
                                             <?php if ($_SESSION['role'] === 'Admin' || $_SESSION['role'] === 'Procurement'): ?>
                                             <button onclick="confirmDeletePO('<?= urlencode($item['idpurchaseorder']) ?>')" class="inline-flex items-center px-3 py-1.5 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors duration-150 text-xs font-medium shadow-sm">
                                                 <i class="fas fa-trash mr-1.5"></i>Delete

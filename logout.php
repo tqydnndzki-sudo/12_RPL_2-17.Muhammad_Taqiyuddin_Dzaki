@@ -6,7 +6,7 @@ if (session_status() === PHP_SESSION_NONE) {
 // Destroy all session data
 session_destroy();
 
-// Redirect to login page
-header('Location: login.php');
+// Redirect to login page with correct path
+header('Location: /login.php');
 exit;
 ?>
