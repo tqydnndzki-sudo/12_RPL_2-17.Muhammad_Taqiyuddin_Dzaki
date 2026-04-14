@@ -1,6 +1,6 @@
 <?php
 require_once __DIR__ . '/../../middleware.php';
-require_role([1]);
+require_po_access(); // Hanya Admin dan Procurement
 require_once __DIR__ . '/../../db.php';
 
 $pr = $_GET['pr'] ?? '';
